@@ -60,7 +60,8 @@
       "Bash(echo:*)",
       "Bash(grep:*)",
       "Bash(git rm:*)",
-      "Bash(mv:*)"
+      "Bash(mv:*)",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "ask": [],

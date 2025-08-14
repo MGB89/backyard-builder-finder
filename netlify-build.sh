@@ -3,6 +3,6 @@
 
 echo "Building Next.js app only..."
 cd apps/web
-npm install
-npm run build
+pnpm install --frozen-lockfile
+pnpm build
 echo "Build complete!"
