@@ -90,7 +90,8 @@ const authOptions: NextAuthOptions = {
       }
       
       // Token refresh - check if token is about to expire
-      if (trigger === 'update' || (token.exp && Date.now() / 1000 > token.exp - 300)) {
+      const tokenExp = token.exp as number;
+      if (trigger === 'update' || (tokenExp && Date.now() / 1000 > tokenExp - 300)) {
         try {
           // Refresh user data from backend
           const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/auth/refresh`, {
