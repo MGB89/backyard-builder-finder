@@ -167,7 +167,7 @@ const authOptions: NextAuthOptions = {
         .setProtectedHeader({ alg: 'HS256' })
         .setIssuedAt()
         .setExpirationTime('30m')
-        .sign(new TextEncoder().encode(secret));
+        .sign(new TextEncoder().encode(typeof secret === 'string' ? secret : secret.toString()));
       
       return encodedToken;
     },
