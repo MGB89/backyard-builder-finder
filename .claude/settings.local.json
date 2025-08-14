@@ -53,10 +53,20 @@
       "Bash(gh secret set:*)",
       "Bash(cd:*)",
       "Bash(cd:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(cd:*)",
+      "Bash(git remote set-url:*)",
+      "Bash(git config:*)",
+      "Bash(echo:*)",
+      "Bash(grep:*)",
+      "Bash(git rm:*)",
+      "Bash(mv:*)"
     ],
     "deny": [],
     "ask": [],
-    "defaultMode": "acceptEdits"
+    "defaultMode": "acceptEdits",
+    "additionalDirectories": [
+      "/Users/michaelbachelis/Desktop"
+    ]
   }
 }

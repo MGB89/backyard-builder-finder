@@ -9,10 +9,10 @@
     "dist"
   ],
   "scripts": {
-    "build": "rollup -c",
-    "build:watch": "rollup -c -w",
+    "build": "rollup -c rollup.config.mjs",
+    "build:watch": "rollup -c rollup.config.mjs -w",
     "clean": "rimraf dist",
-    "dev": "rollup -c -w",
+    "dev": "rollup -c rollup.config.mjs -w",
     "lint": "eslint src --ext .ts,.tsx",
     "lint:fix": "eslint src --ext .ts,.tsx --fix",
     "type-check": "tsc --noEmit",
