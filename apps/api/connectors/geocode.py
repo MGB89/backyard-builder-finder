@@ -1,523 +1,324 @@
-"""
-Geocoding connector for address to coordinate conversion
-"""
-
-from typing import Optional, Dict, Any, List
-from urllib.parse import urlencode
+"""Geocoding service connector with multiple providers."""
+from typing import Dict, Any, Optional, Tuple
+import httpx
 import logging
 
-from .base import BaseConnector, ConnectorResponse, RateLimitInfo
+from connectors.base import BaseConnector
 from core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
-class GeocodeConnector(BaseConnector):
-    """
-    Universal geocoding connector supporting multiple providers
-    """
+class GeocodeConnector:
+    """Multi-provider geocoding service."""
     
-    def __init__(
-        self,
-        provider: str = "google",
-        api_key: Optional[str] = None,
-        **kwargs
-    ):
-        self.provider = provider.lower()
-        
-        # Provider-specific configuration
-        if self.provider == "google":
-            base_url = "https://maps.googleapis.com/maps/api"
-            rate_limit = RateLimitInfo(
-                requests_per_second=10,
-                requests_per_minute=600,
-                requests_per_hour=36000,
-                requests_per_day=864000
-            )
-        elif self.provider == "mapbox":
-            base_url = "https://api.mapbox.com"
-            rate_limit = RateLimitInfo(
-                requests_per_second=10,
-                requests_per_minute=600,
-                requests_per_hour=36000,
-                requests_per_day=100000
-            )
-        elif self.provider == "arcgis":
-            base_url = "https://geocode.arcgis.com/arcgis/rest/services"
-            rate_limit = RateLimitInfo(
-                requests_per_second=5,
-                requests_per_minute=300,
-                requests_per_hour=18000,
-                requests_per_day=432000
-            )
-        else:
-            raise ValueError(f"Unsupported geocoding provider: {provider}")
-        
-        super().__init__(
-            api_key=api_key or settings.GEOCODING_API_KEY,
-            base_url=base_url,
-            rate_limit=rate_limit,
-            **kwargs
-        )
+    def __init__(self):
+        self.providers = self._init_providers()
     
-    async def test_connection(self) -> ConnectorResponse:
-        """Test the geocoding service connection"""
-        try:
-            # Test with a simple address
-            result = await self.geocode("1600 Amphitheatre Parkway, Mountain View, CA")
-            
-            if result.success:
-                return ConnectorResponse(
-                    success=True,
-                    data={
-                        "status": "connected",
-                        "provider": self.provider,
-                        "test_result": "success"
-                    }
-                )
-            else:
-                return ConnectorResponse(
-                    success=False,
-                    error=f"Test geocoding failed: {result.error}"
-                )
+    def _init_providers(self) -> Dict[str, BaseConnector]:
+        """Initialize available geocoding providers."""
+        providers = {}
         
-        except Exception as e:
-            return ConnectorResponse(
-                success=False,
-                error=f"Connection test failed: {str(e)}"
-            )
-    
-    async def get_service_info(self) -> ConnectorResponse:
-        """Get geocoding service information"""
-        provider_info = {
-            "google": {
-                "name": "Google Geocoding API",
-                "documentation": "https://developers.google.com/maps/documentation/geocoding",
-                "features": ["geocoding", "reverse_geocoding", "place_details"]
-            },
-            "mapbox": {
-                "name": "Mapbox Geocoding API",
-                "documentation": "https://docs.mapbox.com/api/search/geocoding/",
-                "features": ["geocoding", "reverse_geocoding", "batch_geocoding"]
-            },
-            "arcgis": {
-                "name": "ArcGIS World Geocoding Service",
-                "documentation": "https://developers.arcgis.com/rest/geocode/api-reference/",
-                "features": ["geocoding", "reverse_geocoding", "suggest"]
-            }
-        }
+        # Always include Nominatim (free)
+        providers["nominatim"] = NominatimProvider()
         
-        return ConnectorResponse(
-            success=True,
-            data={
-                "provider": self.provider,
-                "info": provider_info.get(self.provider, {}),
-                "rate_limit": self.rate_limit.__dict__ if self.rate_limit else None
-            }
-        )
+        # Add paid providers if keys are available
+        if settings.MAPBOX_TOKEN:
+            providers["mapbox"] = MapboxProvider(settings.MAPBOX_TOKEN)
+        
+        if settings.GOOGLE_MAPS_API_KEY:
+            providers["google"] = GoogleMapsProvider(settings.GOOGLE_MAPS_API_KEY)
+        
+        if settings.MAPTILER_KEY:
+            providers["maptiler"] = MapTilerProvider(settings.MAPTILER_KEY)
+        
+        return providers
     
     async def geocode(
         self,
         address: str,
-        components: Optional[Dict[str, str]] = None,
-        bounds: Optional[Dict[str, float]] = None
-    ) -> ConnectorResponse:
-        """
-        Geocode an address to coordinates
+        provider: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Geocode an address to coordinates."""
+        # Use specified provider or fall back to available ones
+        if provider and provider in self.providers:
+            return await self.providers[provider].geocode(address)
         
-        Args:
-            address: Address string to geocode
-            components: Component filters (country, administrative_area, etc.)
-            bounds: Bounding box to bias results
-            
-        Returns:
-            ConnectorResponse: Geocoding result with coordinates and details
-        """
-        try:
-            if self.provider == "google":
-                return await self._geocode_google(address, components, bounds)
-            elif self.provider == "mapbox":
-                return await self._geocode_mapbox(address, components, bounds)
-            elif self.provider == "arcgis":
-                return await self._geocode_arcgis(address, components, bounds)
-            else:
-                return ConnectorResponse(
-                    success=False,
-                    error=f"Unsupported provider: {self.provider}"
-                )
+        # Try providers in order of preference
+        for provider_name in ["nominatim", "mapbox", "google", "maptiler"]:
+            if provider_name in self.providers:
+                try:
+                    result = await self.providers[provider_name].geocode(address)
+                    if result:
+                        return result
+                except Exception as e:
+                    logger.warning(f"Geocoding failed with {provider_name}: {e}")
+                    continue
         
-        except Exception as e:
-            logger.error(f"Geocoding error: {str(e)}")
-            return ConnectorResponse(
-                success=False,
-                error=f"Geocoding failed: {str(e)}"
-            )
+        return None
     
     async def reverse_geocode(
         self,
-        latitude: float,
-        longitude: float,
-        result_type: Optional[str] = None
-    ) -> ConnectorResponse:
-        """
-        Reverse geocode coordinates to address
+        lat: float,
+        lon: float,
+        provider: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Reverse geocode coordinates to address."""
+        if provider and provider in self.providers:
+            return await self.providers[provider].reverse_geocode(lat, lon)
         
-        Args:
-            latitude: Latitude coordinate
-            longitude: Longitude coordinate
-            result_type: Type of result to return
-            
-        Returns:
-            ConnectorResponse: Reverse geocoding result with address details
-        """
-        try:
-            if self.provider == "google":
-                return await self._reverse_geocode_google(latitude, longitude, result_type)
-            elif self.provider == "mapbox":
-                return await self._reverse_geocode_mapbox(latitude, longitude, result_type)
-            elif self.provider == "arcgis":
-                return await self._reverse_geocode_arcgis(latitude, longitude, result_type)
-            else:
-                return ConnectorResponse(
-                    success=False,
-                    error=f"Unsupported provider: {self.provider}"
-                )
+        # Try providers in order
+        for provider_name in ["nominatim", "mapbox", "google", "maptiler"]:
+            if provider_name in self.providers:
+                try:
+                    result = await self.providers[provider_name].reverse_geocode(lat, lon)
+                    if result:
+                        return result
+                except Exception as e:
+                    logger.warning(f"Reverse geocoding failed with {provider_name}: {e}")
+                    continue
         
-        except Exception as e:
-            logger.error(f"Reverse geocoding error: {str(e)}")
-            return ConnectorResponse(
-                success=False,
-                error=f"Reverse geocoding failed: {str(e)}"
-            )
+        return None
+
+
+class NominatimProvider(BaseConnector):
+    """OpenStreetMap Nominatim geocoding (free)."""
     
-    async def _geocode_google(
-        self,
-        address: str,
-        components: Optional[Dict[str, str]] = None,
-        bounds: Optional[Dict[str, float]] = None
-    ) -> ConnectorResponse:
-        """Geocode using Google Maps API"""
+    def __init__(self):
+        super().__init__("https://nominatim.openstreetmap.org")
+    
+    async def geocode(self, address: str) -> Optional[Dict[str, Any]]:
+        """Geocode address using Nominatim."""
         params = {
-            "address": address,
-            "key": self.api_key
+            "q": address,
+            "format": "json",
+            "limit": 1,
+            "addressdetails": 1
         }
         
-        if components:
-            component_str = "|".join([f"{k}:{v}" for k, v in components.items()])
-            params["components"] = component_str
+        results = await self.fetch("search", params=params)
+        if results and len(results) > 0:
+            result = results[0]
+            return {
+                "lat": float(result["lat"]),
+                "lon": float(result["lon"]),
+                "display_name": result.get("display_name"),
+                "address": result.get("address", {}),
+                "bbox": result.get("boundingbox"),
+                "provider": "nominatim"
+            }
         
-        if bounds:
-            params["bounds"] = f"{bounds['south']},{bounds['west']}|{bounds['north']},{bounds['east']}"
-        
-        response = await self._make_request("GET", "/geocode/json", params=params)
-        
-        if not response.success:
-            return response
-        
-        data = response.data
-        if data.get("status") == "OK" and data.get("results"):
-            result = data["results"][0]
-            location = result["geometry"]["location"]
-            
-            return ConnectorResponse(
-                success=True,
-                data={
-                    "latitude": location["lat"],
-                    "longitude": location["lng"],
-                    "formatted_address": result["formatted_address"],
-                    "place_id": result.get("place_id"),
-                    "types": result.get("types", []),
-                    "address_components": result.get("address_components", []),
-                    "geometry": result.get("geometry", {}),
-                    "provider": "google"
-                },
-                metadata={"total_results": len(data["results"])}
-            )
-        else:
-            return ConnectorResponse(
-                success=False,
-                error=f"Geocoding failed: {data.get('status', 'Unknown error')}"
-            )
+        return None
     
-    async def _geocode_mapbox(
-        self,
-        address: str,
-        components: Optional[Dict[str, str]] = None,
-        bounds: Optional[Dict[str, float]] = None
-    ) -> ConnectorResponse:
-        """Geocode using Mapbox API"""
-        url = f"/geocoding/v5/mapbox.places/{address}.json"
+    async def reverse_geocode(self, lat: float, lon: float) -> Optional[Dict[str, Any]]:
+        """Reverse geocode using Nominatim."""
+        params = {
+            "lat": lat,
+            "lon": lon,
+            "format": "json",
+            "addressdetails": 1
+        }
+        
+        result = await self.fetch("reverse", params=params)
+        if result:
+            return {
+                "lat": lat,
+                "lon": lon,
+                "display_name": result.get("display_name"),
+                "address": result.get("address", {}),
+                "provider": "nominatim"
+            }
+        
+        return None
+
+
+class MapboxProvider(BaseConnector):
+    """Mapbox geocoding service."""
+    
+    def __init__(self, api_key: str):
+        super().__init__("https://api.mapbox.com/geocoding/v5/mapbox.places")
+        self.api_key = api_key
+    
+    async def geocode(self, address: str) -> Optional[Dict[str, Any]]:
+        """Geocode using Mapbox."""
+        endpoint = f"{address}.json"
         params = {
             "access_token": self.api_key,
             "limit": 1
         }
         
-        if components and "country" in components:
-            params["country"] = components["country"]
+        result = await self.fetch(endpoint, params=params)
+        if result and result.get("features"):
+            feature = result["features"][0]
+            return {
+                "lat": feature["center"][1],
+                "lon": feature["center"][0],
+                "display_name": feature.get("place_name"),
+                "address": self._parse_mapbox_context(feature.get("context", [])),
+                "bbox": feature.get("bbox"),
+                "provider": "mapbox"
+            }
         
-        if bounds:
-            params["bbox"] = f"{bounds['west']},{bounds['south']},{bounds['east']},{bounds['north']}"
-        
-        response = await self._make_request("GET", url, params=params)
-        
-        if not response.success:
-            return response
-        
-        data = response.data
-        if data.get("features"):
-            feature = data["features"][0]
-            coordinates = feature["geometry"]["coordinates"]
-            
-            return ConnectorResponse(
-                success=True,
-                data={
-                    "latitude": coordinates[1],
-                    "longitude": coordinates[0],
-                    "formatted_address": feature["place_name"],
-                    "place_id": feature.get("id"),
-                    "types": feature.get("place_type", []),
-                    "properties": feature.get("properties", {}),
-                    "context": feature.get("context", []),
-                    "provider": "mapbox"
-                },
-                metadata={"total_results": len(data["features"])}
-            )
-        else:
-            return ConnectorResponse(
-                success=False,
-                error="No geocoding results found"
-            )
+        return None
     
-    async def _geocode_arcgis(
-        self,
-        address: str,
-        components: Optional[Dict[str, str]] = None,
-        bounds: Optional[Dict[str, float]] = None
-    ) -> ConnectorResponse:
-        """Geocode using ArcGIS API"""
+    async def reverse_geocode(self, lat: float, lon: float) -> Optional[Dict[str, Any]]:
+        """Reverse geocode using Mapbox."""
+        endpoint = f"{lon},{lat}.json"
         params = {
-            "SingleLine": address,
-            "f": "json",
-            "outFields": "*",
-            "maxLocations": 1
+            "access_token": self.api_key
         }
         
-        if self.api_key:
-            params["token"] = self.api_key
+        result = await self.fetch(endpoint, params=params)
+        if result and result.get("features"):
+            feature = result["features"][0]
+            return {
+                "lat": lat,
+                "lon": lon,
+                "display_name": feature.get("place_name"),
+                "address": self._parse_mapbox_context(feature.get("context", [])),
+                "provider": "mapbox"
+            }
         
-        if components and "country" in components:
-            params["countryCode"] = components["country"]
-        
-        if bounds:
-            params["searchExtent"] = f"{bounds['west']},{bounds['south']},{bounds['east']},{bounds['north']}"
-        
-        response = await self._make_request(
-            "GET",
-            "/World/GeocodeServer/findAddressCandidates",
-            params=params
-        )
-        
-        if not response.success:
-            return response
-        
-        data = response.data
-        if data.get("candidates"):
-            candidate = data["candidates"][0]
-            location = candidate["location"]
-            
-            return ConnectorResponse(
-                success=True,
-                data={
-                    "latitude": location["y"],
-                    "longitude": location["x"],
-                    "formatted_address": candidate["address"],
-                    "score": candidate.get("score"),
-                    "attributes": candidate.get("attributes", {}),
-                    "provider": "arcgis"
-                },
-                metadata={"total_results": len(data["candidates"])}
-            )
-        else:
-            return ConnectorResponse(
-                success=False,
-                error="No geocoding results found"
-            )
+        return None
     
-    async def _reverse_geocode_google(
-        self,
-        latitude: float,
-        longitude: float,
-        result_type: Optional[str] = None
-    ) -> ConnectorResponse:
-        """Reverse geocode using Google Maps API"""
+    def _parse_mapbox_context(self, context: list) -> Dict[str, str]:
+        """Parse Mapbox context into address components."""
+        address = {}
+        for item in context:
+            if "postcode" in item["id"]:
+                address["postcode"] = item["text"]
+            elif "place" in item["id"]:
+                address["city"] = item["text"]
+            elif "region" in item["id"]:
+                address["state"] = item["text"]
+            elif "country" in item["id"]:
+                address["country"] = item["text"]
+        return address
+
+
+class GoogleMapsProvider(BaseConnector):
+    """Google Maps geocoding service."""
+    
+    def __init__(self, api_key: str):
+        super().__init__("https://maps.googleapis.com/maps/api/geocode")
+        self.api_key = api_key
+    
+    async def geocode(self, address: str) -> Optional[Dict[str, Any]]:
+        """Geocode using Google Maps."""
         params = {
-            "latlng": f"{latitude},{longitude}",
+            "address": address,
             "key": self.api_key
         }
         
-        if result_type:
-            params["result_type"] = result_type
+        result = await self.fetch("json", params=params)
+        if result and result.get("results"):
+            location = result["results"][0]
+            geometry = location["geometry"]
+            return {
+                "lat": geometry["location"]["lat"],
+                "lon": geometry["location"]["lng"],
+                "display_name": location.get("formatted_address"),
+                "address": self._parse_google_components(location.get("address_components", [])),
+                "bbox": self._google_viewport_to_bbox(geometry.get("viewport")),
+                "provider": "google"
+            }
         
-        response = await self._make_request("GET", "/geocode/json", params=params)
-        
-        if not response.success:
-            return response
-        
-        data = response.data
-        if data.get("status") == "OK" and data.get("results"):
-            results = data["results"]
-            
-            return ConnectorResponse(
-                success=True,
-                data={
-                    "results": results,
-                    "formatted_address": results[0]["formatted_address"] if results else None,
-                    "provider": "google"
-                },
-                metadata={"total_results": len(results)}
-            )
-        else:
-            return ConnectorResponse(
-                success=False,
-                error=f"Reverse geocoding failed: {data.get('status', 'Unknown error')}"
-            )
+        return None
     
-    async def _reverse_geocode_mapbox(
-        self,
-        latitude: float,
-        longitude: float,
-        result_type: Optional[str] = None
-    ) -> ConnectorResponse:
-        """Reverse geocode using Mapbox API"""
-        url = f"/geocoding/v5/mapbox.places/{longitude},{latitude}.json"
+    async def reverse_geocode(self, lat: float, lon: float) -> Optional[Dict[str, Any]]:
+        """Reverse geocode using Google Maps."""
         params = {
-            "access_token": self.api_key,
-            "limit": 5
+            "latlng": f"{lat},{lon}",
+            "key": self.api_key
         }
         
-        if result_type:
-            params["types"] = result_type
+        result = await self.fetch("json", params=params)
+        if result and result.get("results"):
+            location = result["results"][0]
+            return {
+                "lat": lat,
+                "lon": lon,
+                "display_name": location.get("formatted_address"),
+                "address": self._parse_google_components(location.get("address_components", [])),
+                "provider": "google"
+            }
         
-        response = await self._make_request("GET", url, params=params)
-        
-        if not response.success:
-            return response
-        
-        data = response.data
-        features = data.get("features", [])
-        
-        return ConnectorResponse(
-            success=True,
-            data={
-                "results": features,
-                "formatted_address": features[0]["place_name"] if features else None,
-                "provider": "mapbox"
-            },
-            metadata={"total_results": len(features)}
-        )
+        return None
     
-    async def _reverse_geocode_arcgis(
-        self,
-        latitude: float,
-        longitude: float,
-        result_type: Optional[str] = None
-    ) -> ConnectorResponse:
-        """Reverse geocode using ArcGIS API"""
+    def _parse_google_components(self, components: list) -> Dict[str, str]:
+        """Parse Google address components."""
+        address = {}
+        for component in components:
+            types = component.get("types", [])
+            if "street_number" in types:
+                address["house_number"] = component["short_name"]
+            elif "route" in types:
+                address["road"] = component["short_name"]
+            elif "locality" in types:
+                address["city"] = component["short_name"]
+            elif "administrative_area_level_1" in types:
+                address["state"] = component["short_name"]
+            elif "postal_code" in types:
+                address["postcode"] = component["short_name"]
+            elif "country" in types:
+                address["country"] = component["short_name"]
+        return address
+    
+    def _google_viewport_to_bbox(self, viewport: Optional[dict]) -> Optional[list]:
+        """Convert Google viewport to bbox."""
+        if not viewport:
+            return None
+        return [
+            viewport["southwest"]["lng"],
+            viewport["southwest"]["lat"],
+            viewport["northeast"]["lng"],
+            viewport["northeast"]["lat"]
+        ]
+
+
+class MapTilerProvider(BaseConnector):
+    """MapTiler geocoding service."""
+    
+    def __init__(self, api_key: str):
+        super().__init__("https://api.maptiler.com/geocoding")
+        self.api_key = api_key
+    
+    async def geocode(self, address: str) -> Optional[Dict[str, Any]]:
+        """Geocode using MapTiler."""
+        endpoint = f"{address}.json"
         params = {
-            "location": f"{longitude},{latitude}",
-            "f": "json",
-            "outFields": "*"
+            "key": self.api_key,
+            "limit": 1
         }
         
-        if self.api_key:
-            params["token"] = self.api_key
+        result = await self.fetch(endpoint, params=params)
+        if result and result.get("features"):
+            feature = result["features"][0]
+            return {
+                "lat": feature["center"][1],
+                "lon": feature["center"][0],
+                "display_name": feature.get("place_name"),
+                "bbox": feature.get("bbox"),
+                "provider": "maptiler"
+            }
         
-        response = await self._make_request(
-            "GET",
-            "/World/GeocodeServer/reverseGeocode",
-            params=params
-        )
-        
-        if not response.success:
-            return response
-        
-        data = response.data
-        if data.get("address"):
-            return ConnectorResponse(
-                success=True,
-                data={
-                    "results": [data],
-                    "formatted_address": data["address"].get("Match_addr"),
-                    "provider": "arcgis"
-                },
-                metadata={"total_results": 1}
-            )
-        else:
-            return ConnectorResponse(
-                success=False,
-                error="No reverse geocoding results found"
-            )
+        return None
     
-    async def batch_geocode(
-        self,
-        addresses: List[str],
-        max_concurrent: int = 5
-    ) -> ConnectorResponse:
-        """
-        Batch geocode multiple addresses
+    async def reverse_geocode(self, lat: float, lon: float) -> Optional[Dict[str, Any]]:
+        """Reverse geocode using MapTiler."""
+        endpoint = f"{lon},{lat}.json"
+        params = {
+            "key": self.api_key
+        }
         
-        Args:
-            addresses: List of addresses to geocode
-            max_concurrent: Maximum concurrent requests
-            
-        Returns:
-            ConnectorResponse: Batch geocoding results
-        """
-        import asyncio
+        result = await self.fetch(endpoint, params=params)
+        if result and result.get("features"):
+            feature = result["features"][0]
+            return {
+                "lat": lat,
+                "lon": lon,
+                "display_name": feature.get("place_name"),
+                "provider": "maptiler"
+            }
         
-        semaphore = asyncio.Semaphore(max_concurrent)
-        
-        async def geocode_single(address):
-            async with semaphore:
-                return await self.geocode(address)
-        
-        try:
-            tasks = [geocode_single(address) for address in addresses]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            successful_results = []
-            failed_results = []
-            
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    failed_results.append({
-                        "address": addresses[i],
-                        "error": str(result)
-                    })
-                elif result.success:
-                    successful_results.append({
-                        "address": addresses[i],
-                        "result": result.data
-                    })
-                else:
-                    failed_results.append({
-                        "address": addresses[i],
-                        "error": result.error
-                    })
-            
-            return ConnectorResponse(
-                success=True,
-                data={
-                    "successful": successful_results,
-                    "failed": failed_results,
-                    "total_processed": len(addresses),
-                    "success_count": len(successful_results),
-                    "failure_count": len(failed_results)
-                }
-            )
-        
-        except Exception as e:
-            return ConnectorResponse(
-                success=False,
-                error=f"Batch geocoding failed: {str(e)}"
-            )
+        return None

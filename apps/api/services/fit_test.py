@@ -229,7 +229,7 @@ class FitTestService:
             return {
                 "success": True,
                 "building_count": len(building_list),
-                "buildable_area_sqft": buildable_area.area,
+                "buildable_area_sqft": self._convert_area_to_sqft(buildable_area.area),
                 "placement_combinations": evaluated_combinations,
                 "recommended_combination": best_combination,
                 "fits_all_buildings": best_combination is not None,
@@ -354,14 +354,14 @@ class FitTestService:
                 "success": True,
                 "optimized": True,
                 "parcel_area_sqft": parcel_area,
-                "buildable_area_sqft": buildable_area.area,
+                "buildable_area_sqft": self._convert_area_to_sqft(buildable_area.area),
                 "max_coverage_ratio": max_coverage_ratio,
                 "existing_building_area_sqft": existing_area,
                 "max_new_building_area_sqft": max_new_building_area,
                 "optimized_dimensions": optimal_dimensions,
                 "optimized_placement": best_placement,
                 "coverage_utilization": (optimal_dimensions["area"] + existing_area) / parcel_area,
-                "buildable_area_utilization": optimal_dimensions["area"] / buildable_area.area if buildable_area.area > 0 else 0
+                "buildable_area_utilization": optimal_dimensions["area"] / self._convert_area_to_sqft(buildable_area.area) if buildable_area.area > 0 else 0
             }
         
         except Exception as e:

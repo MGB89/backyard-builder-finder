@@ -16,16 +16,30 @@ from models.user import User, UserApiKey
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# Encryption for API keys
-if settings.KMS_KEY_ID:
-    # In production, use AWS KMS
-    # This is a placeholder - actual KMS integration would go here
-    fernet_key = base64.urlsafe_b64encode(secrets.token_bytes(32))
-else:
-    # For development, use a local key
-    fernet_key = base64.urlsafe_b64encode(secrets.token_bytes(32))
+# Encryption for API keys - will be handled by secrets provider
+_cipher = None
+_secrets_provider = None
 
-cipher = Fernet(fernet_key)
+def _get_cipher():
+    """Get or create cipher instance."""
+    global _cipher, _secrets_provider
+    
+    if _cipher is None:
+        try:
+            # Try to use secrets provider for encryption
+            from services.providers import get_secrets_provider
+            _secrets_provider = get_secrets_provider()
+            _cipher = "provider"  # Marker to use provider
+        except Exception:
+            # Fallback to local encryption
+            if settings.ENCRYPTION_SECRET_KEY:
+                key = settings.ENCRYPTION_SECRET_KEY[:32].ljust(32, '0')
+                fernet_key = base64.urlsafe_b64encode(key.encode())
+            else:
+                fernet_key = base64.urlsafe_b64encode(secrets.token_bytes(32))
+            _cipher = Fernet(fernet_key)
+    
+    return _cipher
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -62,12 +76,26 @@ def decode_token(token: str) -> Dict[str, Any]:
 
 def encrypt_api_key(api_key: str) -> str:
     """Encrypt an API key for storage."""
-    return cipher.encrypt(api_key.encode()).decode()
+    cipher = _get_cipher()
+    
+    if cipher == "provider" and _secrets_provider:
+        # Use secrets provider for encryption
+        return _secrets_provider.encrypt_for_db(api_key)
+    else:
+        # Use local Fernet encryption
+        return cipher.encrypt(api_key.encode()).decode()
 
 
 def decrypt_api_key(encrypted_key: str) -> str:
     """Decrypt an API key."""
-    return cipher.decrypt(encrypted_key.encode()).decode()
+    cipher = _get_cipher()
+    
+    if cipher == "provider" and _secrets_provider:
+        # Use secrets provider for decryption
+        return _secrets_provider.decrypt_from_db(encrypted_key)
+    else:
+        # Use local Fernet decryption
+        return cipher.decrypt(encrypted_key.encode()).decode()
 
 
 async def get_current_user(db: AsyncSession, token: str) -> Optional[User]:
@@ -132,10 +160,14 @@ def generate_api_key() -> str:
 async def validate_nextauth_token(token: str) -> Optional[Dict[str, Any]]:
     """Validate a NextAuth JWT token."""
     try:
+        # Import here to avoid circular imports
+        from services.secrets import get_nextauth_secret
+        
         # NextAuth uses a different secret for signing
+        nextauth_secret = get_nextauth_secret()
         payload = jwt.decode(
             token, 
-            settings.NEXTAUTH_SECRET, 
+            nextauth_secret, 
             algorithms=["HS256"]
         )
         return payload

@@ -207,3 +207,12 @@ class OrganizationResponse(OrganizationBase):
     
     class Config:
         from_attributes = True
+
+
+class NextAuthSignIn(BaseModel):
+    """NextAuth sign-in data from OAuth providers"""
+    email: EmailStr
+    name: Optional[str] = None
+    image: Optional[str] = None
+    provider: str
+    providerId: Optional[str] = None

@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     
     # Application
     APP_NAME: str = "Backyard Builder Finder API"
+    PROJECT_NAME: str = Field(default="backyard-builder", env="PROJECT_NAME")
     ENVIRONMENT: str = Field(default="development", env="ENVIRONMENT")
     DEBUG: bool = Field(default=False, env="DEBUG")
     
@@ -38,7 +39,31 @@ class Settings(BaseSettings):
     REDIS_URL: str = Field(default="redis://localhost:6379", env="REDIS_URL")
     CACHE_TTL: int = Field(default=3600, env="CACHE_TTL")
     
-    # AWS
+    # Provider configuration
+    STORAGE_PROVIDER: str = Field(default="supabase", env="STORAGE_PROVIDER")
+    QUEUE_PROVIDER: str = Field(default="pgboss", env="QUEUE_PROVIDER") 
+    SECRETS_PROVIDER: str = Field(default="app", env="SECRETS_PROVIDER")
+    METRICS_PROVIDER: str = Field(default="otel", env="METRICS_PROVIDER")
+    
+    # Supabase configuration
+    SUPABASE_URL: Optional[str] = Field(default=None, env="SUPABASE_URL")
+    SUPABASE_ANON_KEY: Optional[str] = Field(default=None, env="SUPABASE_ANON_KEY")
+    SUPABASE_SERVICE_ROLE_KEY: Optional[str] = Field(default=None, env="SUPABASE_SERVICE_ROLE_KEY")
+    
+    # Storage configuration
+    STORAGE_BUCKET: str = Field(default="exports", env="STORAGE_BUCKET")
+    
+    # App-level encryption
+    ENCRYPTION_SECRET_KEY: Optional[str] = Field(default=None, env="ENCRYPTION_SECRET_KEY")
+    ENCRYPTION_KEY_VERSION: int = Field(default=1, env="ENCRYPTION_KEY_VERSION")
+    
+    # Observability
+    OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: Optional[str] = Field(default=None, env="OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+    OTEL_EXPORTER_OTLP_HEADERS: Optional[str] = Field(default=None, env="OTEL_EXPORTER_OTLP_HEADERS")
+    SERVICE_NAME: str = Field(default="backyard-builder-api", env="SERVICE_NAME")
+    SERVICE_VERSION: str = Field(default="1.0.0", env="SERVICE_VERSION")
+    
+    # Legacy AWS support (for migration)
     AWS_REGION: str = Field(default="us-west-2", env="AWS_REGION")
     AWS_ACCESS_KEY_ID: Optional[str] = Field(default=None, env="AWS_ACCESS_KEY_ID")
     AWS_SECRET_ACCESS_KEY: Optional[str] = Field(default=None, env="AWS_SECRET_ACCESS_KEY")
@@ -48,8 +73,9 @@ class Settings(BaseSettings):
     # OAuth Providers
     GOOGLE_CLIENT_ID: Optional[str] = Field(default=None, env="GOOGLE_CLIENT_ID")
     GOOGLE_CLIENT_SECRET: Optional[str] = Field(default=None, env="GOOGLE_CLIENT_SECRET")
-    MICROSOFT_CLIENT_ID: Optional[str] = Field(default=None, env="MICROSOFT_CLIENT_ID")
-    MICROSOFT_CLIENT_SECRET: Optional[str] = Field(default=None, env="MICROSOFT_CLIENT_SECRET")
+    AZURE_AD_CLIENT_ID: Optional[str] = Field(default=None, env="AZURE_AD_CLIENT_ID")
+    AZURE_AD_CLIENT_SECRET: Optional[str] = Field(default=None, env="AZURE_AD_CLIENT_SECRET")
+    AZURE_AD_TENANT_ID: Optional[str] = Field(default=None, env="AZURE_AD_TENANT_ID")
     
     # LLM Providers
     OPENAI_BASE_URL: str = Field(default="https://api.openai.com/v1", env="OPENAI_BASE_URL")

@@ -73,3 +73,5 @@ override.tf.json
 
 # OS
 Thumbs.db
+# Local Netlify folder
+.netlify

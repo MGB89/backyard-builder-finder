@@ -4,7 +4,14 @@ Zoning evaluation service for compliance analysis
 
 from typing import Dict, Any, List, Optional, Tuple
 import logging
+from functools import lru_cache
+import json
+import hashlib
 from datetime import datetime
+from shapely.geometry import Polygon
+from shapely.ops import transform
+from shapely.validation import make_valid
+from pyproj import Transformer
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +33,15 @@ class ZoningEvaluationService:
             "use_permitted", "density", "height", "setbacks", 
             "lot_coverage", "far", "parking", "landscaping"
         ]
+        
+        # Cache for coordinate transformations
+        self._transformer_cache = {}
+        # WGS84 (lat/lon) to Web Mercator for area calculations
+        self.to_mercator = self._get_transformer("EPSG:4326", "EPSG:3857")
+        self.from_mercator = self._get_transformer("EPSG:3857", "EPSG:4326")
+        
+        # Cache for zoning compliance results
+        self._compliance_cache = {}
     
     def evaluate_zoning_compliance(
         self,
@@ -47,9 +63,18 @@ class ZoningEvaluationService:
             Dict[str, Any]: Comprehensive zoning compliance evaluation
         """
         try:
-            # Extract key information
+            # Extract key information and handle geometry
             parcel_area = parcel_data.get("area_sqft", 0)
+            if parcel_area == 0 and "geometry" in parcel_data:
+                # Calculate area from geometry if not provided
+                parcel_polygon = self._create_polygon_from_geometry(parcel_data["geometry"])
+                if parcel_polygon:
+                    parcel_area = self._convert_area_to_sqft(parcel_polygon.area)
+            
             zoning_code = zoning_district.get("code", "Unknown")
+            
+            # Create cache key for this evaluation
+            cache_key = self._create_cache_key(parcel_data, zoning_district, proposed_development)
             
             # Perform individual compliance checks
             compliance_results = {}
@@ -131,7 +156,7 @@ class ZoningEvaluationService:
                 parcel_data
             )
             
-            return {
+            result = {
                 "success": True,
                 "zoning_code": zoning_code,
                 "zoning_category": self._categorize_zoning(zoning_code),
@@ -142,8 +167,13 @@ class ZoningEvaluationService:
                 "recommendations": recommendations,
                 "violations": overall_assessment["violations"],
                 "warnings": overall_assessment["warnings"],
+                "parcel_area_sqft": parcel_area,
                 "evaluation_date": datetime.utcnow().isoformat()
             }
+            
+            # Cache the result
+            self._compliance_cache[cache_key] = result
+            return result
         
         except Exception as e:
             logger.error(f"Zoning evaluation error: {str(e)}")
@@ -715,3 +745,230 @@ class ZoningEvaluationService:
                     return category
         
         return "other"
+    
+    def _get_transformer(self, from_crs: str, to_crs: str) -> Transformer:
+        """Get cached transformer for coordinate conversions"""
+        key = f"{from_crs}_{to_crs}"
+        if key not in self._transformer_cache:
+            self._transformer_cache[key] = Transformer.from_crs(from_crs, to_crs, always_xy=True)
+        return self._transformer_cache[key]
+    
+    def _create_polygon_from_geometry(self, geometry: Dict[str, Any]) -> Optional[Polygon]:
+        """Create Shapely polygon from geometry dictionary with proper SRID handling"""
+        try:
+            polygon = None
+            
+            if geometry.get("type") == "Polygon":
+                coordinates = geometry.get("coordinates", [])
+                if coordinates and len(coordinates) > 0:
+                    # Use exterior ring, handle holes if present
+                    exterior_ring = coordinates[0]
+                    holes = coordinates[1:] if len(coordinates) > 1 else None
+                    polygon = Polygon(exterior_ring, holes)
+            
+            elif geometry.get("type") == "polygon" and geometry.get("rings"):
+                # ArcGIS format
+                rings = geometry.get("rings", [])
+                if rings:
+                    polygon = Polygon(rings[0])
+            
+            elif "coordinates" in geometry:
+                # Try to handle various coordinate formats
+                coords = geometry["coordinates"]
+                if isinstance(coords, list) and len(coords) > 2:
+                    polygon = Polygon(coords)
+            
+            if polygon and not polygon.is_valid:
+                polygon = make_valid(polygon)
+                logger.warning("Fixed invalid polygon geometry")
+            
+            # Assume input is in WGS84 (EPSG:4326) and transform to Web Mercator for calculations
+            if polygon and polygon.is_valid:
+                polygon = transform(self.to_mercator.transform, polygon)
+            
+            return polygon
+        
+        except Exception as e:
+            logger.error(f"Error creating polygon: {str(e)}")
+            return None
+    
+    def _convert_area_to_sqft(self, area_sq_meters: float) -> float:
+        """Convert square meters to square feet"""
+        return area_sq_meters * 10.7639
+    
+    def _create_cache_key(self, parcel_data: Dict[str, Any], zoning_district: Dict[str, Any], proposed_development: Dict[str, Any]) -> str:
+        """Create cache key for compliance evaluation"""
+        # Create a hash from the key parameters
+        key_data = {
+            "parcel_area": parcel_data.get("area_sqft", 0),
+            "zoning_code": zoning_district.get("code"),
+            "zoning_rules": {
+                "max_density": zoning_district.get("max_density_units_acre"),
+                "max_height": zoning_district.get("max_building_height_ft"),
+                "max_coverage": zoning_district.get("max_lot_coverage"),
+                "max_far": zoning_district.get("max_floor_area_ratio")
+            },
+            "proposed": {
+                "units": proposed_development.get("units"),
+                "height": proposed_development.get("height_ft"),
+                "area": proposed_development.get("building_area_sqft"),
+                "use_type": proposed_development.get("use_type")
+            }
+        }
+        
+        key_str = json.dumps(key_data, sort_keys=True)
+        return hashlib.md5(key_str.encode()).hexdigest()
+    
+    @lru_cache(maxsize=256)
+    def get_cached_compliance_check(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        """Get cached compliance check result"""
+        return self._compliance_cache.get(cache_key)
+    
+    def clear_compliance_cache(self):
+        """Clear the compliance cache"""
+        self._compliance_cache.clear()
+        self.get_cached_compliance_check.cache_clear()
+    
+    def get_zoning_summary(self, zoning_district: Dict[str, Any]) -> Dict[str, Any]:
+        """Get a summary of zoning district regulations"""
+        try:
+            zoning_code = zoning_district.get("code", "Unknown")
+            category = self._categorize_zoning(zoning_code)
+            
+            # Extract key regulations
+            key_regulations = {
+                "use_restrictions": {
+                    "permitted_uses": zoning_district.get("permitted_uses", []),
+                    "conditional_uses": zoning_district.get("conditional_uses", []),
+                    "prohibited_uses": zoning_district.get("prohibited_uses", [])
+                },
+                "dimensional_standards": {
+                    "max_height_ft": zoning_district.get("max_building_height_ft"),
+                    "max_stories": zoning_district.get("max_stories"),
+                    "max_lot_coverage_percent": zoning_district.get("max_lot_coverage"),
+                    "max_far": zoning_district.get("max_floor_area_ratio"),
+                    "max_density_units_acre": zoning_district.get("max_density_units_acre")
+                },
+                "setback_requirements": {
+                    "front_ft": zoning_district.get("min_building_setback_front_ft"),
+                    "rear_ft": zoning_district.get("min_building_setback_rear_ft"),
+                    "side_ft": zoning_district.get("min_building_setback_side_ft"),
+                    "corner_side_ft": zoning_district.get("min_building_setback_corner_side_ft")
+                },
+                "parking_requirements": {
+                    "spaces_per_unit": zoning_district.get("min_parking_spaces_per_unit"),
+                    "general_requirements": zoning_district.get("parking_requirements")
+                }
+            }
+            
+            # Calculate development potential metrics
+            potential_metrics = self._calculate_development_potential(key_regulations)
+            
+            return {
+                "success": True,
+                "zoning_code": zoning_code,
+                "category": category,
+                "key_regulations": key_regulations,
+                "development_potential": potential_metrics,
+                "restrictiveness_score": self._calculate_restrictiveness_score(key_regulations),
+                "summary_generated": datetime.utcnow().isoformat()
+            }
+        
+        except Exception as e:
+            logger.error(f"Error generating zoning summary: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Zoning summary generation failed: {str(e)}"
+            }
+    
+    def _calculate_development_potential(self, regulations: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate development potential based on zoning regulations"""
+        dimensional = regulations.get("dimensional_standards", {})
+        
+        # Estimate development capacity for a typical parcel (1 acre = 43,560 sq ft)
+        typical_parcel_sqft = 43560
+        
+        potential = {
+            "typical_parcel_analysis": {
+                "parcel_size_sqft": typical_parcel_sqft,
+                "parcel_size_acres": 1.0
+            }
+        }
+        
+        # Maximum units based on density
+        max_density = dimensional.get("max_density_units_acre")
+        if max_density:
+            potential["max_units_by_density"] = max_density
+        
+        # Maximum building area based on lot coverage
+        max_coverage = dimensional.get("max_lot_coverage_percent")
+        if max_coverage:
+            max_building_area = typical_parcel_sqft * (max_coverage / 100)
+            potential["max_building_area_sqft"] = max_building_area
+        
+        # Maximum floor area based on FAR
+        max_far = dimensional.get("max_far")
+        if max_far:
+            max_floor_area = typical_parcel_sqft * max_far
+            potential["max_floor_area_sqft"] = max_floor_area
+            
+            # Estimate possible stories
+            if max_coverage and max_building_area > 0:
+                possible_stories = max_floor_area / max_building_area
+                potential["possible_stories_by_far"] = round(possible_stories, 1)
+        
+        return potential
+    
+    def _calculate_restrictiveness_score(self, regulations: Dict[str, Any]) -> float:
+        """Calculate a restrictiveness score (0-10, higher = more restrictive)"""
+        score = 0
+        factors = 0
+        
+        dimensional = regulations.get("dimensional_standards", {})
+        setbacks = regulations.get("setback_requirements", {})
+        
+        # Height restrictions (more restrictive if lower)
+        max_height = dimensional.get("max_height_ft")
+        if max_height:
+            if max_height < 25:
+                score += 3
+            elif max_height < 35:
+                score += 2
+            elif max_height < 50:
+                score += 1
+            factors += 1
+        
+        # Lot coverage restrictions
+        max_coverage = dimensional.get("max_lot_coverage_percent")
+        if max_coverage:
+            if max_coverage < 30:
+                score += 3
+            elif max_coverage < 50:
+                score += 2
+            elif max_coverage < 70:
+                score += 1
+            factors += 1
+        
+        # Setback requirements
+        total_setbacks = sum(v for v in setbacks.values() if v is not None)
+        if total_setbacks > 0:
+            if total_setbacks > 100:
+                score += 3
+            elif total_setbacks > 60:
+                score += 2
+            elif total_setbacks > 30:
+                score += 1
+            factors += 1
+        
+        # FAR restrictions
+        max_far = dimensional.get("max_far")
+        if max_far:
+            if max_far < 0.5:
+                score += 3
+            elif max_far < 1.0:
+                score += 2
+            elif max_far < 2.0:
+                score += 1
+            factors += 1
+        
+        return (score / max(factors, 1)) if factors > 0 else 0

@@ -1,0 +1,92 @@
+version: 2
+updates:
+  # Frontend dependencies
+  - package-ecosystem: "npm"
+    directory: "/apps/web"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "frontend"
+    reviewers:
+      - "michaelbachelis"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+
+  # Root package dependencies
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "root"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+
+  # Backend dependencies
+  - package-ecosystem: "pip"
+    directory: "/apps/api"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "backend"
+    reviewers:
+      - "michaelbachelis"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+
+  # Docker base images
+  - package-ecosystem: "docker"
+    directory: "/apps/api"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "build"
+      include: "scope"
+
+  - package-ecosystem: "docker"
+    directory: "/apps/web"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "build"
+      include: "scope"

@@ -17,7 +17,7 @@ from schemas.auth import (
     LoginRequest, LoginResponse, TokenRefresh, PasswordChange,
     PasswordReset, PasswordResetConfirm, UserCreate, UserResponse,
     UserUpdate, UserProfile, LogoutRequest, AccountVerification,
-    OrganizationCreate, OrganizationResponse
+    OrganizationCreate, OrganizationResponse, NextAuthSignIn
 )
 
 logger = logging.getLogger(__name__)
@@ -603,4 +603,148 @@ async def get_user_sessions(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve sessions"
+        )
+
+
+@router.post("/signin")
+async def nextauth_signin(
+    signin_data: NextAuthSignIn,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Handle NextAuth sign-in - create or update user from OAuth provider"""
+    try:
+        # Find or create user by email
+        user = db.query(User).filter(User.email == signin_data.email).first()
+        
+        if not user:
+            # Create new user from OAuth data
+            # Find or create default organization
+            default_org = db.query(Organization).filter(
+                Organization.name == "Default Organization"
+            ).first()
+            
+            if not default_org:
+                default_org = Organization(
+                    name="Default Organization",
+                    description="Default organization for OAuth users",
+                    is_active=True
+                )
+                db.add(default_org)
+                db.flush()
+            
+            user = User(
+                email=signin_data.email,
+                username=signin_data.email,  # Use email as username
+                first_name=signin_data.name.split(' ')[0] if signin_data.name else '',
+                last_name=' '.join(signin_data.name.split(' ')[1:]) if signin_data.name and ' ' in signin_data.name else '',
+                profile_image=signin_data.image,
+                role='member',
+                organization_id=default_org.id,
+                is_active=True,
+                is_verified=True,  # OAuth users are pre-verified
+                oauth_provider=signin_data.provider,
+                oauth_provider_id=signin_data.providerId
+            )
+            db.add(user)
+            
+            # Log user creation
+            AuditLog.log_event(
+                event_type="create",
+                event_category="auth",
+                action="OAuth user created",
+                description=f"New OAuth user created: {user.email} via {signin_data.provider}",
+                ip_address=request.client.host,
+                user_agent=request.headers.get("user-agent"),
+                status="success"
+            )
+        else:
+            # Update existing user information
+            if signin_data.name and not user.first_name:
+                user.first_name = signin_data.name.split(' ')[0]
+                if ' ' in signin_data.name:
+                    user.last_name = ' '.join(signin_data.name.split(' ')[1:])
+            
+            if signin_data.image:
+                user.profile_image = signin_data.image
+            
+            user.last_login_at = datetime.utcnow()
+            user.oauth_provider = signin_data.provider
+            user.oauth_provider_id = signin_data.providerId
+        
+        db.commit()
+        db.refresh(user)
+        
+        # Log successful sign-in
+        AuditLog.log_event(
+            event_type="login_success",
+            event_category="auth",
+            action="OAuth sign-in successful",
+            user_id=user.id,
+            description=f"OAuth sign-in for user: {user.email} via {signin_data.provider}",
+            ip_address=request.client.host,
+            user_agent=request.headers.get("user-agent"),
+            status="success"
+        )
+        
+        return {
+            "id": str(user.id),
+            "email": user.email,
+            "name": f"{user.first_name} {user.last_name}".strip(),
+            "image": user.profile_image,
+            "org_id": str(user.organization_id),
+            "role": user.role
+        }
+    
+    except Exception as e:
+        logger.error(f"NextAuth sign-in error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Sign-in failed"
+        )
+
+
+@router.post("/refresh")
+async def nextauth_refresh(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Refresh user data for NextAuth"""
+    try:
+        # Get user ID from request body
+        body = await request.json()
+        user_id = body.get('userId')
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User ID required"
+            )
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        
+        if not user or not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found or inactive"
+            )
+        
+        # Update last activity
+        user.last_login_at = datetime.utcnow()
+        db.commit()
+        
+        return {
+            "id": str(user.id),
+            "email": user.email,
+            "org_id": str(user.organization_id),
+            "role": user.role
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"NextAuth refresh error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Refresh failed"
         )

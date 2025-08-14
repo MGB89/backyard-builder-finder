@@ -1,0 +1,162 @@
+services:
+  # FastAPI Backend Service
+  - type: web
+    name: backyard-builder-api
+    runtime: python
+    region: oregon # or ohio, frankfurt, singapore
+    plan: free # or starter ($7/month), standard ($25/month)
+    
+    # Build configuration
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+      cd packages/providers && pip install -e . && cd ../..
+    
+    # Start command
+    startCommand: |
+      uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
+    
+    # Health check
+    healthCheckPath: /health
+    
+    # Environment variables (set in Render dashboard for security)
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: PROJECT_NAME
+        value: backyard-builder
+      - key: LOG_LEVEL
+        value: INFO
+      
+      # Database (Supabase)
+      - key: DATABASE_URL
+        sync: false # Set in dashboard with actual Supabase connection string
+      - key: SYNC_DATABASE_URL
+        sync: false # Set in dashboard
+      
+      # Supabase Configuration
+      - key: SUPABASE_URL
+        sync: false # Set in dashboard
+      - key: SUPABASE_ANON_KEY
+        sync: false # Set in dashboard
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false # Set in dashboard
+      
+      # Provider Configuration
+      - key: STORAGE_PROVIDER
+        value: supabase
+      - key: QUEUE_PROVIDER
+        value: pgboss
+      - key: SECRETS_PROVIDER
+        value: app
+      - key: METRICS_PROVIDER
+        value: otel
+      
+      # App-level Encryption
+      - key: ENCRYPTION_SECRET_KEY
+        generateValue: true # Render will generate a secure random value
+      - key: ENCRYPTION_KEY_VERSION
+        value: "1"
+      
+      # JWT Configuration
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: JWT_EXPIRATION_HOURS
+        value: "24"
+      
+      # NextAuth Integration
+      - key: NEXTAUTH_URL
+        sync: false # Set to your Netlify URL
+      - key: NEXTAUTH_SECRET
+        generateValue: true
+      
+      # OAuth Providers (optional, set in dashboard)
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: AZURE_AD_CLIENT_ID
+        sync: false
+      - key: AZURE_AD_CLIENT_SECRET
+        sync: false
+      - key: AZURE_AD_TENANT_ID
+        sync: false
+      
+      # Redis Cache (optional, use Render Redis)
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: backyard-builder-cache
+          property: connectionString
+      
+      # Storage Configuration
+      - key: STORAGE_BUCKET
+        value: exports
+      
+      # Data Sources
+      - key: LA_PARCELS_ENDPOINT
+        value: https://maps.lacity.org/arcgis/rest/services/Parcel/MapServer/0
+      - key: LA_ZONING_ENDPOINT
+        value: https://maps.lacity.org/arcgis/rest/services/Zoning/MapServer/0
+      - key: MSFT_BUILDINGS_URL
+        value: https://github.com/microsoft/USBuildingFootprints
+      
+      # Geocoding (optional)
+      - key: MAPBOX_TOKEN
+        sync: false
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
+      - key: MAPTILER_KEY
+        sync: false
+      
+      # OpenTelemetry (optional)
+      - key: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+        sync: false
+      - key: SERVICE_NAME
+        value: backyard-builder-api
+      - key: SERVICE_VERSION
+        value: 1.0.0
+      
+      # CORS Origins (update with your Netlify URL)
+      - key: CORS_ORIGINS
+        value: "http://localhost:3000,https://backyard-builder.netlify.app"
+      
+      # Feature Flags
+      - key: ENABLE_CV_MODULE
+        value: "false"
+      - key: ENABLE_PORTAL_SCRAPING
+        value: "false"
+      - key: REQUIRE_TOS_ACCEPTANCE
+        value: "true"
+      
+      # System Limits
+      - key: MAX_PARCELS_PER_SEARCH
+        value: "50000"
+      - key: MAX_LLM_TOKENS_PER_ORG_DAILY
+        value: "100000"
+      - key: DEFAULT_PAGE_SIZE
+        value: "100"
+      - key: RATE_LIMIT_REQUESTS
+        value: "100"
+      - key: RATE_LIMIT_WINDOW
+        value: "60"
+    
+    # Auto-deploy from GitHub
+    autoDeploy: true
+    
+    # Pull request previews
+    pullRequestPreviewsEnabled: true
+
+  # Optional: Redis Cache Service
+  - type: redis
+    name: backyard-builder-cache
+    region: oregon
+    plan: free # 25MB free tier
+    ipAllowList: [] # Allow connections from all Render services
+
+# Database notes:
+# We're using Supabase for the database, so no need for Render PostgreSQL
+# Set the DATABASE_URL in Render dashboard to your Supabase connection string:
+# postgresql://postgres.[project-ref]:[password]@aws-0-[region].pooler.supabase.com:5432/postgres

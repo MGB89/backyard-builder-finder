@@ -399,7 +399,37 @@ resource "aws_secretsmanager_secret_version" "db_connection" {
   })
 }
 
-# Secret for third-party API keys (example)
+# OAuth provider secrets
+resource "aws_secretsmanager_secret" "oauth_providers" {
+  name                    = "${local.name_prefix}-oauth-providers"
+  description             = "OAuth provider credentials for ${local.name_prefix}"
+  kms_key_id             = aws_kms_key.secrets.arn
+  recovery_window_in_days = var.environment == "prod" ? 30 : 0
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-oauth-providers"
+  })
+}
+
+resource "aws_secretsmanager_secret_version" "oauth_providers" {
+  secret_id = aws_secretsmanager_secret.oauth_providers.id
+  secret_string = jsonencode({
+    nextauth_secret = random_password.nextauth_secret.result
+    google_client_id = "REPLACE_WITH_GOOGLE_CLIENT_ID"
+    google_client_secret = "REPLACE_WITH_GOOGLE_CLIENT_SECRET"
+    azure_ad_client_id = "REPLACE_WITH_AZURE_AD_CLIENT_ID"
+    azure_ad_client_secret = "REPLACE_WITH_AZURE_AD_CLIENT_SECRET"
+    azure_ad_tenant_id = "REPLACE_WITH_AZURE_AD_TENANT_ID"
+  })
+}
+
+# NextAuth Secret
+resource "random_password" "nextauth_secret" {
+  length  = 32
+  special = true
+}
+
+# Secret for third-party API keys
 resource "aws_secretsmanager_secret" "third_party_apis" {
   name                    = "${local.name_prefix}-third-party-apis"
   description             = "Third-party API keys for ${local.name_prefix}"
@@ -414,11 +444,10 @@ resource "aws_secretsmanager_secret" "third_party_apis" {
 resource "aws_secretsmanager_secret_version" "third_party_apis" {
   secret_id = aws_secretsmanager_secret.third_party_apis.id
   secret_string = jsonencode({
-    google_maps_api_key = "CHANGE_ME"
-    sendgrid_api_key   = "CHANGE_ME"
-    stripe_secret_key  = "CHANGE_ME"
-    aws_access_key_id  = "CHANGE_ME"
-    aws_secret_access_key = "CHANGE_ME"
+    mapbox_token = "REPLACE_WITH_MAPBOX_TOKEN"
+    google_maps_api_key = "REPLACE_WITH_GOOGLE_MAPS_KEY"
+    openai_api_key = "USER_PROVIDED_ENCRYPTED"
+    anthropic_api_key = "USER_PROVIDED_ENCRYPTED"
   })
 }
 

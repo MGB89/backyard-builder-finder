@@ -4,8 +4,13 @@ Obstacle detection and analysis service for development constraints
 
 from typing import Dict, Any, List, Optional, Tuple
 import logging
+from functools import lru_cache
+import json
+import hashlib
 from shapely.geometry import Polygon, Point, LineString, MultiPolygon
-from shapely.ops import unary_union
+from shapely.ops import unary_union, transform
+from shapely.validation import make_valid
+from pyproj import Transformer
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -31,6 +36,12 @@ class ObstacleAnalysisService:
             "wetlands": 100,
             "steep_slopes": 20
         }
+        
+        # Cache for coordinate transformations
+        self._transformer_cache = {}
+        # WGS84 (lat/lon) to Web Mercator for area calculations
+        self.to_mercator = self._get_transformer("EPSG:4326", "EPSG:3857")
+        self.from_mercator = self._get_transformer("EPSG:3857", "EPSG:4326")
     
     def analyze_obstacles(
         self,
@@ -99,7 +110,7 @@ class ObstacleAnalysisService:
             
             return {
                 "success": True,
-                "parcel_area_sqft": parcel_polygon.area,
+                "parcel_area_sqft": self._convert_area_to_sqft(parcel_polygon.area),
                 "obstacle_inventory": obstacle_inventory,
                 "constraint_zones": constraint_zones,
                 "developable_area": developable_area,
@@ -120,20 +131,47 @@ class ObstacleAnalysisService:
                 "error": f"Obstacle analysis failed: {str(e)}"
             }
     
+    def _get_transformer(self, from_crs: str, to_crs: str) -> Transformer:
+        """Get cached transformer for coordinate conversions"""
+        key = f"{from_crs}_{to_crs}"
+        if key not in self._transformer_cache:
+            self._transformer_cache[key] = Transformer.from_crs(from_crs, to_crs, always_xy=True)
+        return self._transformer_cache[key]
+
     def _create_polygon_from_geometry(self, geometry: Dict[str, Any]) -> Optional[Polygon]:
-        """Create Shapely polygon from geometry dictionary"""
+        """Create Shapely polygon from geometry dictionary with proper SRID handling"""
         try:
+            polygon = None
+            
             if geometry.get("type") == "Polygon":
                 coordinates = geometry.get("coordinates", [])
                 if coordinates and len(coordinates) > 0:
-                    return Polygon(coordinates[0])
+                    # Use exterior ring, handle holes if present
+                    exterior_ring = coordinates[0]
+                    holes = coordinates[1:] if len(coordinates) > 1 else None
+                    polygon = Polygon(exterior_ring, holes)
             
             elif geometry.get("type") == "polygon" and geometry.get("rings"):
+                # ArcGIS format
                 rings = geometry.get("rings", [])
                 if rings:
-                    return Polygon(rings[0])
+                    polygon = Polygon(rings[0])
             
-            return None
+            elif "coordinates" in geometry:
+                # Try to handle various coordinate formats
+                coords = geometry["coordinates"]
+                if isinstance(coords, list) and len(coords) > 2:
+                    polygon = Polygon(coords)
+            
+            if polygon and not polygon.is_valid:
+                polygon = make_valid(polygon)
+                logger.warning("Fixed invalid polygon geometry")
+            
+            # Assume input is in WGS84 (EPSG:4326) and transform to Web Mercator for calculations
+            if polygon and polygon.is_valid:
+                polygon = transform(self.to_mercator.transform, polygon)
+            
+            return polygon
         
         except Exception as e:
             logger.error(f"Error creating polygon: {str(e)}")
@@ -169,9 +207,10 @@ class ObstacleAnalysisService:
                     obstacle_geometry = Point(coords[0])
             
             if obstacle_geometry:
-                # Calculate buffer zone if applicable
+                # Calculate buffer zone if applicable (convert feet to meters)
                 buffer_distance = self.buffer_distances.get(feature_type, 0)
-                constraint_zone = obstacle_geometry.buffer(buffer_distance) if buffer_distance > 0 else obstacle_geometry
+                buffer_distance_m = buffer_distance * 0.3048  # Convert feet to meters
+                constraint_zone = obstacle_geometry.buffer(buffer_distance_m) if buffer_distance > 0 else obstacle_geometry
                 
                 obstacle_info = {
                     "id": feature.get("id", f"{feature_type}_{len(obstacle_inventory[category])}"),
@@ -179,7 +218,7 @@ class ObstacleAnalysisService:
                     "geometry": self._geometry_to_dict(obstacle_geometry),
                     "constraint_zone": self._geometry_to_dict(constraint_zone),
                     "buffer_distance_ft": buffer_distance,
-                    "area_sqft": obstacle_geometry.area if hasattr(obstacle_geometry, 'area') else 0,
+                    "area_sqft": self._convert_area_to_sqft(obstacle_geometry.area) if hasattr(obstacle_geometry, 'area') else 0,
                     "severity": feature.get("severity", "medium"),
                     "removable": feature.get("removable", False),
                     "mitigation_cost": feature.get("mitigation_cost"),
@@ -222,7 +261,7 @@ class ObstacleAnalysisService:
                         "geometry": self._geometry_to_dict(constraint_geometry),
                         "constraint_zone": self._geometry_to_dict(constraint_zone),
                         "buffer_distance_ft": buffer_dist,
-                        "area_sqft": constraint_geometry.area,
+                        "area_sqft": self._convert_area_to_sqft(constraint_geometry.area),
                         "severity": severity,
                         "removable": False,
                         "mitigation_cost": None,
@@ -267,7 +306,7 @@ class ObstacleAnalysisService:
                     union_geom = unary_union(constraints)
                     severity_zones[severity] = {
                         "geometry": self._geometry_to_dict(union_geom),
-                        "area_sqft": union_geom.area,
+                        "area_sqft": self._convert_area_to_sqft(union_geom.area),
                         "count": len(constraints)
                     }
                 else:
@@ -283,7 +322,7 @@ class ObstacleAnalysisService:
             return {
                 "total_constrained_area": {
                     "geometry": self._geometry_to_dict(total_constrained_area),
-                    "area_sqft": total_constrained_area.area,
+                    "area_sqft": self._convert_area_to_sqft(total_constrained_area.area),
                     "percentage_of_parcel": (total_constrained_area.area / parcel.area) * 100
                 },
                 "by_severity": severity_zones,
@@ -323,18 +362,18 @@ class ObstacleAnalysisService:
             largest_area = max(developable_polygons, key=lambda p: p.area) if developable_polygons else Polygon()
             
             return {
-                "total_area_sqft": developable_geometry.area,
+                "total_area_sqft": self._convert_area_to_sqft(developable_geometry.area),
                 "percentage_of_parcel": (developable_geometry.area / parcel.area) * 100,
                 "geometry": self._geometry_to_dict(developable_geometry),
                 "contiguous_areas": [
                     {
                         "geometry": self._geometry_to_dict(poly),
-                        "area_sqft": poly.area
+                        "area_sqft": self._convert_area_to_sqft(poly.area)
                     }
                     for poly in developable_polygons
                 ],
-                "largest_contiguous_area_sqft": largest_area.area,
-                "fragmentation_score": len(developable_polygons) / max(1, developable_geometry.area / 1000)
+                "largest_contiguous_area_sqft": self._convert_area_to_sqft(largest_area.area),
+                "fragmentation_score": len(developable_polygons) / max(1, self._convert_area_to_sqft(developable_geometry.area) / 1000)
             }
         
         except Exception as e:
@@ -388,7 +427,7 @@ class ObstacleAnalysisService:
                                 "obstacle_type": obstacle["type"],
                                 "category": category,
                                 "severity": obstacle["severity"],
-                                "conflict_area_sqft": conflict_area,
+                                "conflict_area_sqft": self._convert_area_to_sqft(conflict_area),
                                 "conflict_percentage": (conflict_area / proposed_geometry.area) * 100,
                                 "mitigation_required": obstacle["severity"] in ["high", "medium"],
                                 "estimated_mitigation_cost": obstacle.get("mitigation_cost"),
@@ -403,7 +442,7 @@ class ObstacleAnalysisService:
             return {
                 "conflict_detected": len(conflicts) > 0,
                 "total_conflicts": len(conflicts),
-                "total_conflict_area_sqft": total_conflict_area,
+                "total_conflict_area_sqft": self._convert_area_to_sqft(total_conflict_area),
                 "conflict_percentage": (total_conflict_area / proposed_geometry.area) * 100,
                 "conflicts": conflicts,
                 "by_severity": {
@@ -576,29 +615,57 @@ class ObstacleAnalysisService:
         except Exception:
             return None
     
+    def _convert_area_to_sqft(self, area_sq_meters: float) -> float:
+        """Convert square meters to square feet"""
+        return area_sq_meters * 10.7639
+
+    def _convert_length_to_ft(self, length_meters: float) -> float:
+        """Convert meters to feet"""
+        return length_meters * 3.28084
+
+    @lru_cache(maxsize=128)
+    def _geometry_to_dict_cached(self, geometry_wkt: str) -> Dict[str, Any]:
+        """Cached geometry to dict conversion"""
+        from shapely import wkt
+        geometry = wkt.loads(geometry_wkt)
+        return self._geometry_to_dict(geometry)
+
     def _geometry_to_dict(self, geometry) -> Optional[Dict[str, Any]]:
-        """Convert Shapely geometry to dictionary"""
+        """Convert Shapely geometry to dictionary in WGS84"""
         try:
             if hasattr(geometry, 'is_empty') and geometry.is_empty:
                 return None
             
             if hasattr(geometry, 'geom_type'):
-                if geometry.geom_type == 'Point':
+                # Transform back to WGS84 for output
+                geometry_wgs84 = transform(self.from_mercator.transform, geometry)
+                
+                if geometry_wgs84.geom_type == 'Point':
                     return {
                         "type": "Point",
-                        "coordinates": [geometry.x, geometry.y]
+                        "coordinates": [geometry_wgs84.x, geometry_wgs84.y],
+                        "crs": "EPSG:4326"
                     }
-                elif geometry.geom_type == 'Polygon':
+                elif geometry_wgs84.geom_type == 'Polygon':
+                    coords = [list(geometry_wgs84.exterior.coords)]
+                    if geometry_wgs84.interiors:
+                        coords.extend([list(interior.coords) for interior in geometry_wgs84.interiors])
                     return {
                         "type": "Polygon",
-                        "coordinates": [list(geometry.exterior.coords)]
+                        "coordinates": coords,
+                        "crs": "EPSG:4326"
                     }
-                elif geometry.geom_type == 'MultiPolygon':
+                elif geometry_wgs84.geom_type == 'MultiPolygon':
+                    coords = []
+                    for poly in geometry_wgs84.geoms:
+                        poly_coords = [list(poly.exterior.coords)]
+                        if poly.interiors:
+                            poly_coords.extend([list(interior.coords) for interior in poly.interiors])
+                        coords.append(poly_coords)
                     return {
                         "type": "MultiPolygon",
-                        "coordinates": [
-                            [list(poly.exterior.coords)] for poly in geometry.geoms
-                        ]
+                        "coordinates": coords,
+                        "crs": "EPSG:4326"
                     }
             
             return None

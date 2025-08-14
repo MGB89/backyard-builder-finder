@@ -1,549 +1,500 @@
-"""
-ArcGIS parcel data connector for property information
-"""
-
-from typing import Optional, Dict, Any, List
+"""ArcGIS parcel data connector for various regions."""
+from typing import Dict, Any, List, Optional, Tuple
 import logging
+import asyncio
+from datetime import datetime, timedelta
+from shapely import wkb, wkt
+from shapely.geometry import shape, Polygon, MultiPolygon
+import json
+import hashlib
 
-from .base import BaseConnector, ConnectorResponse, RateLimitInfo
+from connectors.base import BaseConnector
 from core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
-class ArcGISParcelConnector(BaseConnector):
-    """
-    Connector for ArcGIS-based parcel data services
-    Supports various county and state parcel databases
-    """
+class ArcGISParcelsConnector(BaseConnector):
+    """Generic ArcGIS FeatureServer connector for parcel data."""
     
-    def __init__(
-        self,
-        service_url: Optional[str] = None,
-        api_key: Optional[str] = None,
-        **kwargs
-    ):
-        # Default to generic ArcGIS service if no URL provided
-        base_url = service_url or "https://services.arcgis.com"
-        
-        # Standard ArcGIS rate limits
-        rate_limit = RateLimitInfo(
-            requests_per_second=10,
-            requests_per_minute=600,
-            requests_per_hour=36000,
-            requests_per_day=864000
-        )
-        
-        super().__init__(
-            api_key=api_key or settings.ARCGIS_API_KEY,
-            base_url=base_url,
-            rate_limit=rate_limit,
-            timeout=30,
-            **kwargs
-        )
-        
-        # Common ArcGIS endpoints
-        self.endpoints = {
-            "parcels": "/MapServer/0",
-            "assessments": "/MapServer/1",
-            "owners": "/MapServer/2",
-            "sales": "/MapServer/3"
+    # Region-specific endpoints (free/open data sources)
+    ENDPOINTS = {
+        "los-angeles": {
+            "parcels": {
+                "url": "https://maps.lacity.org/arcgis/rest/services/BETA/BaseMap_Labels_WM/MapServer/1",
+                "name": "LA City Parcels",
+                "id_field": "AIN",
+                "area_field": "Shape__Area",
+                "zoning_field": "UseType",
+                "max_records": 1000
+            },
+            "zoning": {
+                "url": "https://maps.lacity.org/arcgis/rest/services/BETA/BaseMap_Labels_WM/MapServer/0",
+                "name": "LA City Zoning",
+                "id_field": "OBJECTID",
+                "zoning_field": "ZONE_CMPLT"
+            },
+            "county_parcels": {
+                "url": "https://maps.lacity.org/arcgis/rest/services/Addressing/Parcels/MapServer/0",
+                "name": "LA County Parcels",
+                "id_field": "AIN",
+                "area_field": "Shape_Area",
+                "max_records": 2000
+            }
+        },
+        "san-francisco": {
+            "parcels": {
+                "url": "https://services.arcgis.com/bkFwd6KaVFjLCRlE/ArcGIS/rest/services/Parcels/FeatureServer/0",
+                "name": "San Francisco County",
+                "id_field": "blklot",
+                "area_field": "Shape__Area",
+                "max_records": 1000
+            }
+        },
+        "seattle": {
+            "parcels": {
+                "url": "https://services.arcgis.com/ZOyb2t4B0UWuU8wN/ArcGIS/rest/services/Parcels/FeatureServer/0",
+                "name": "King County",
+                "id_field": "PIN",
+                "area_field": "Shape__Area",
+                "max_records": 1000
+            }
         }
+    }
     
-    async def test_connection(self) -> ConnectorResponse:
-        """Test the ArcGIS service connection"""
+    def __init__(self, region: str = "los-angeles", layer: str = "parcels"):
+        """Initialize connector for specific region and layer."""
+        if region not in self.ENDPOINTS:
+            raise ValueError(f"Unsupported region: {region}. Available: {list(self.ENDPOINTS.keys())}")
+        
+        if layer not in self.ENDPOINTS[region]:
+            available_layers = list(self.ENDPOINTS[region].keys())
+            raise ValueError(f"Unsupported layer: {layer}. Available for {region}: {available_layers}")
+        
+        self.region = region
+        self.layer = layer
+        self.config = self.ENDPOINTS[region][layer]
+        self._cache = {}  # Simple in-memory cache
+        self._cache_ttl = timedelta(hours=1)  # Cache for 1 hour
+        super().__init__(self.config["url"])
+    
+    async def query_parcels_by_bbox(
+        self,
+        min_lon: float,
+        min_lat: float,
+        max_lon: float,
+        max_lat: float,
+        limit: int = 100,
+        offset: int = 0,
+        cache_key_suffix: str = ""
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Query parcels within bounding box with caching and metadata."""
+        # Generate cache key
+        cache_key = self._generate_cache_key(
+            "bbox", min_lon, min_lat, max_lon, max_lat, limit, offset, cache_key_suffix
+        )
+        
+        # Check cache first
+        cached_result = self._get_from_cache(cache_key)
+        if cached_result:
+            logger.debug(f"Cache hit for bbox query: {cache_key}")
+            return cached_result['data'], cached_result['metadata']
+        
+        # Validate bbox
+        if not self._validate_bbox(min_lon, min_lat, max_lon, max_lat):
+            logger.error(f"Invalid bounding box: {min_lon},{min_lat},{max_lon},{max_lat}")
+            return [], {"error": "Invalid bounding box"}
+        
+        # Limit to service maximum
+        max_records = self.config.get("max_records", 1000)
+        limit = min(limit, max_records)
+        
+        params = {
+            "where": "1=1",
+            "geometry": f"{min_lon},{min_lat},{max_lon},{max_lat}",
+            "geometryType": "esriGeometryEnvelope",
+            "spatialRel": "esriSpatialRelIntersects",
+            "outFields": "*",
+            "returnGeometry": "true",
+            "f": "geojson",
+            "resultOffset": offset,
+            "resultRecordCount": limit,
+            "returnCountOnly": "false",
+            "returnExtentOnly": "false"
+        }
+        
         try:
-            # Test with a simple service info request
-            response = await self._make_request(
-                "GET",
-                f"{self.endpoints['parcels']}",
-                params={"f": "json"}
-            )
+            start_time = datetime.now()
+            result = await self.fetch("query", params=params, timeout=30)
+            end_time = datetime.now()
             
-            if response.success:
-                service_info = response.data
-                return ConnectorResponse(
-                    success=True,
-                    data={
-                        "status": "connected",
-                        "service": "ArcGIS Parcel Service",
-                        "service_name": service_info.get("name", "Unknown"),
-                        "description": service_info.get("description", ""),
-                        "max_record_count": service_info.get("maxRecordCount", 1000)
-                    }
-                )
+            parcels = self._parse_features(result.get("features", []))
+            
+            # Build metadata
+            metadata = {
+                "total_features": len(result.get("features", [])),
+                "returned_count": len(parcels),
+                "offset": offset,
+                "limit": limit,
+                "query_time_ms": int((end_time - start_time).total_seconds() * 1000),
+                "source": f"arcgis_{self.region}_{self.layer}",
+                "bbox": [min_lon, min_lat, max_lon, max_lat],
+                "exceeded_transfer_limit": result.get("exceededTransferLimit", False)
+            }
+            
+            # Cache the result
+            self._set_cache(cache_key, {"data": parcels, "metadata": metadata})
+            
+            logger.info(f"Retrieved {len(parcels)} parcels from {self.region} in {metadata['query_time_ms']}ms")
+            return parcels, metadata
+            
+        except Exception as e:
+            logger.error(f"Failed to query parcels from {self.region}: {e}")
+            error_metadata = {
+                "error": str(e),
+                "source": f"arcgis_{self.region}_{self.layer}",
+                "bbox": [min_lon, min_lat, max_lon, max_lat]
+            }
+            return [], error_metadata
+    
+    async def query_parcels_by_polygon(
+        self,
+        polygon: Polygon,
+        limit: int = 100,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Query parcels within polygon area."""
+        # Convert polygon to ArcGIS ring format
+        rings = [list(polygon.exterior.coords)]
+        
+        params = {
+            "where": "1=1",
+            "geometry": json.dumps({
+                "rings": rings,
+                "spatialReference": {"wkid": 4326}
+            }),
+            "geometryType": "esriGeometryPolygon",
+            "spatialRel": "esriSpatialRelIntersects",
+            "outFields": "*",
+            "returnGeometry": "true",
+            "f": "geojson",
+            "resultOffset": offset,
+            "resultRecordCount": limit
+        }
+        
+        try:
+            result = await self.fetch("query", params=params)
+            return self._parse_features(result.get("features", []))
+        except Exception as e:
+            logger.error(f"Failed to query parcels by polygon: {e}")
+            return []
+    
+    async def get_parcel_by_id(self, parcel_id: str) -> Optional[Dict[str, Any]]:
+        """Get specific parcel by ID with caching."""
+        cache_key = f"parcel_{self.region}_{self.layer}_{parcel_id}"
+        
+        # Check cache
+        cached_result = self._get_from_cache(cache_key)
+        if cached_result:
+            logger.debug(f"Cache hit for parcel {parcel_id}")
+            return cached_result
+        
+        id_field = self.config["id_field"]
+        
+        # Escape single quotes in parcel_id
+        escaped_id = parcel_id.replace("'", "''")
+        
+        params = {
+            "where": f"{id_field} = '{escaped_id}'",
+            "outFields": "*",
+            "returnGeometry": "true",
+            "f": "geojson"
+        }
+        
+        try:
+            result = await self.fetch("query", params=params, timeout=10)
+            features = self._parse_features(result.get("features", []))
+            
+            parcel = features[0] if features else None
+            
+            # Cache individual parcel results
+            self._set_cache(cache_key, parcel)
+            
+            if parcel:
+                logger.debug(f"Retrieved parcel {parcel_id} from {self.region}")
             else:
-                return response
-        
-        except Exception as e:
-            return ConnectorResponse(
-                success=False,
-                error=f"Connection test failed: {str(e)}"
-            )
-    
-    async def get_service_info(self) -> ConnectorResponse:
-        """Get ArcGIS service information"""
-        try:
-            response = await self._make_request(
-                "GET",
-                "/",
-                params={"f": "json"}
-            )
+                logger.warning(f"Parcel {parcel_id} not found in {self.region}")
             
-            if response.success:
-                return ConnectorResponse(
-                    success=True,
-                    data={
-                        "service_info": response.data,
-                        "endpoints": self.endpoints,
-                        "rate_limit": self.rate_limit.__dict__ if self.rate_limit else None
-                    }
-                )
-            else:
-                return response
-        
+            return parcel
+            
         except Exception as e:
-            return ConnectorResponse(
-                success=False,
-                error=f"Failed to get service info: {str(e)}"
-            )
+            logger.error(f"Failed to get parcel {parcel_id} from {self.region}: {e}")
+            return None
     
-    async def get_parcel_by_point(
+    async def query_parcels_with_filters(
         self,
-        latitude: float,
-        longitude: float,
-        return_geometry: bool = True
-    ) -> ConnectorResponse:
-        """
-        Get parcel information by geographic point
+        bbox: Optional[tuple] = None,
+        zoning_codes: Optional[List[str]] = None,
+        min_area: Optional[float] = None,
+        max_area: Optional[float] = None,
+        limit: int = 100,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Query parcels with multiple filters."""
+        # Build where clause
+        where_clauses = []
         
-        Args:
-            latitude: Latitude coordinate
-            longitude: Longitude coordinate
-            return_geometry: Whether to include geometry in response
-            
-        Returns:
-            ConnectorResponse: Parcel information
-        """
-        try:
-            # Construct spatial query
-            geometry = f"{longitude},{latitude}"
-            
-            params = {
-                "f": "json",
-                "geometry": geometry,
-                "geometryType": "esriGeometryPoint",
-                "spatialRel": "esriSpatialRelIntersects",
-                "outFields": "*",
-                "returnGeometry": "true" if return_geometry else "false",
-                "maxRecordCount": 1
-            }
-            
-            if self.api_key:
-                params["token"] = self.api_key
-            
-            response = await self._make_request(
-                "GET",
-                f"{self.endpoints['parcels']}/query",
-                params=params
-            )
-            
-            if not response.success:
-                return response
-            
-            data = response.data
-            features = data.get("features", [])
-            
-            if not features:
-                return ConnectorResponse(
-                    success=False,
-                    error="No parcel found at the specified location"
-                )
-            
-            parcel = features[0]
-            attributes = parcel.get("attributes", {})
-            geometry = parcel.get("geometry") if return_geometry else None
-            
-            # Standardize parcel data
-            standardized_parcel = self._standardize_parcel_data(attributes, geometry)
-            
-            return ConnectorResponse(
-                success=True,
-                data=standardized_parcel,
-                metadata={
-                    "total_features": len(features),
-                    "coordinate": [latitude, longitude]
-                }
-            )
+        if min_area:
+            area_field = self.config.get("area_field", "Shape__Area")
+            where_clauses.append(f"{area_field} >= {min_area}")
         
-        except Exception as e:
-            logger.error(f"Error getting parcel by point: {str(e)}")
-            return ConnectorResponse(
-                success=False,
-                error=f"Failed to get parcel: {str(e)}"
-            )
-    
-    async def get_parcel_by_apn(
-        self,
-        apn: str,
-        apn_field: str = "APN",
-        return_geometry: bool = True
-    ) -> ConnectorResponse:
-        """
-        Get parcel information by Assessor's Parcel Number (APN)
+        if max_area:
+            area_field = self.config.get("area_field", "Shape__Area")
+            where_clauses.append(f"{area_field} <= {max_area}")
         
-        Args:
-            apn: Assessor's Parcel Number
-            apn_field: Field name for APN in the service
-            return_geometry: Whether to include geometry in response
-            
-        Returns:
-            ConnectorResponse: Parcel information
-        """
-        try:
-            where_clause = f"{apn_field} = '{apn}'"
-            
-            params = {
-                "f": "json",
-                "where": where_clause,
-                "outFields": "*",
-                "returnGeometry": "true" if return_geometry else "false",
-                "maxRecordCount": 1
-            }
-            
-            if self.api_key:
-                params["token"] = self.api_key
-            
-            response = await self._make_request(
-                "GET",
-                f"{self.endpoints['parcels']}/query",
-                params=params
-            )
-            
-            if not response.success:
-                return response
-            
-            data = response.data
-            features = data.get("features", [])
-            
-            if not features:
-                return ConnectorResponse(
-                    success=False,
-                    error=f"No parcel found with APN: {apn}"
-                )
-            
-            parcel = features[0]
-            attributes = parcel.get("attributes", {})
-            geometry = parcel.get("geometry") if return_geometry else None
-            
-            standardized_parcel = self._standardize_parcel_data(attributes, geometry)
-            
-            return ConnectorResponse(
-                success=True,
-                data=standardized_parcel,
-                metadata={"apn": apn, "apn_field": apn_field}
-            )
+        if zoning_codes and "zoning_field" in self.config:
+            zoning_field = self.config["zoning_field"]
+            codes_str = "','".join(zoning_codes)
+            where_clauses.append(f"{zoning_field} IN ('{codes_str}')")
         
-        except Exception as e:
-            logger.error(f"Error getting parcel by APN: {str(e)}")
-            return ConnectorResponse(
-                success=False,
-                error=f"Failed to get parcel: {str(e)}"
-            )
-    
-    async def search_parcels(
-        self,
-        where_clause: str,
-        return_geometry: bool = False,
-        max_results: int = 100
-    ) -> ConnectorResponse:
-        """
-        Search parcels using SQL where clause
+        where = " AND ".join(where_clauses) if where_clauses else "1=1"
         
-        Args:
-            where_clause: SQL where clause for filtering
-            return_geometry: Whether to include geometry in response
-            max_results: Maximum number of results to return
-            
-        Returns:
-            ConnectorResponse: Search results
-        """
-        try:
-            params = {
-                "f": "json",
-                "where": where_clause,
-                "outFields": "*",
-                "returnGeometry": "true" if return_geometry else "false",
-                "maxRecordCount": max_results
-            }
-            
-            if self.api_key:
-                params["token"] = self.api_key
-            
-            response = await self._make_request(
-                "GET",
-                f"{self.endpoints['parcels']}/query",
-                params=params
-            )
-            
-            if not response.success:
-                return response
-            
-            data = response.data
-            features = data.get("features", [])
-            
-            standardized_parcels = []
-            for feature in features:
-                attributes = feature.get("attributes", {})
-                geometry = feature.get("geometry") if return_geometry else None
-                standardized_parcel = self._standardize_parcel_data(attributes, geometry)
-                standardized_parcels.append(standardized_parcel)
-            
-            return ConnectorResponse(
-                success=True,
-                data={
-                    "parcels": standardized_parcels,
-                    "total_results": len(standardized_parcels),
-                    "exceeded_transfer_limit": data.get("exceededTransferLimit", False)
-                },
-                metadata={"where_clause": where_clause}
-            )
+        params = {
+            "where": where,
+            "outFields": "*",
+            "returnGeometry": "true",
+            "f": "geojson",
+            "resultOffset": offset,
+            "resultRecordCount": limit
+        }
         
-        except Exception as e:
-            logger.error(f"Error searching parcels: {str(e)}")
-            return ConnectorResponse(
-                success=False,
-                error=f"Parcel search failed: {str(e)}"
-            )
-    
-    async def get_parcels_in_bounds(
-        self,
-        min_longitude: float,
-        min_latitude: float,
-        max_longitude: float,
-        max_latitude: float,
-        return_geometry: bool = False,
-        max_results: int = 500
-    ) -> ConnectorResponse:
-        """
-        Get parcels within bounding box
-        
-        Args:
-            min_longitude: Minimum longitude
-            min_latitude: Minimum latitude
-            max_longitude: Maximum longitude
-            max_latitude: Maximum latitude
-            return_geometry: Whether to include geometry
-            max_results: Maximum number of results
-            
-        Returns:
-            ConnectorResponse: Parcels within bounds
-        """
-        try:
-            # Construct envelope geometry
-            envelope = f"{min_longitude},{min_latitude},{max_longitude},{max_latitude}"
-            
-            params = {
-                "f": "json",
-                "geometry": envelope,
+        # Add spatial filter if bbox provided
+        if bbox:
+            min_lon, min_lat, max_lon, max_lat = bbox
+            params.update({
+                "geometry": f"{min_lon},{min_lat},{max_lon},{max_lat}",
                 "geometryType": "esriGeometryEnvelope",
-                "spatialRel": "esriSpatialRelIntersects",
-                "outFields": "*",
-                "returnGeometry": "true" if return_geometry else "false",
-                "maxRecordCount": max_results
-            }
-            
-            if self.api_key:
-                params["token"] = self.api_key
-            
-            response = await self._make_request(
-                "GET",
-                f"{self.endpoints['parcels']}/query",
-                params=params
-            )
-            
-            if not response.success:
-                return response
-            
-            data = response.data
-            features = data.get("features", [])
-            
-            standardized_parcels = []
-            for feature in features:
-                attributes = feature.get("attributes", {})
-                geometry = feature.get("geometry") if return_geometry else None
-                standardized_parcel = self._standardize_parcel_data(attributes, geometry)
-                standardized_parcels.append(standardized_parcel)
-            
-            return ConnectorResponse(
-                success=True,
-                data={
-                    "parcels": standardized_parcels,
-                    "total_results": len(standardized_parcels),
-                    "bounds": {
-                        "min_longitude": min_longitude,
-                        "min_latitude": min_latitude,
-                        "max_longitude": max_longitude,
-                        "max_latitude": max_latitude
-                    }
-                }
-            )
+                "spatialRel": "esriSpatialRelIntersects"
+            })
         
-        except Exception as e:
-            logger.error(f"Error getting parcels in bounds: {str(e)}")
-            return ConnectorResponse(
-                success=False,
-                error=f"Failed to get parcels in bounds: {str(e)}"
-            )
-    
-    async def get_assessment_data(
-        self,
-        parcel_id: str,
-        id_field: str = "PARCEL_ID"
-    ) -> ConnectorResponse:
-        """
-        Get assessment data for a parcel
-        
-        Args:
-            parcel_id: Parcel identifier
-            id_field: Field name for parcel ID
-            
-        Returns:
-            ConnectorResponse: Assessment data
-        """
         try:
-            where_clause = f"{id_field} = '{parcel_id}'"
+            result = await self.fetch("query", params=params)
+            return self._parse_features(result.get("features", []))
+        except Exception as e:
+            logger.error(f"Failed to query parcels with filters: {e}")
+            return []
+    
+    def _parse_features(self, features: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Parse GeoJSON features into standard format with validation."""
+        parcels = []
+        parse_errors = 0
+        
+        for idx, feature in enumerate(features):
+            try:
+                # Extract and validate geometry
+                geom_data = feature.get("geometry")
+                if not geom_data:
+                    logger.warning(f"Feature {idx} missing geometry")
+                    parse_errors += 1
+                    continue
+                
+                geom = shape(geom_data)
+                
+                # Validate geometry
+                if not geom.is_valid:
+                    logger.warning(f"Feature {idx} has invalid geometry")
+                    # Try to fix simple issues
+                    geom = geom.buffer(0)
+                    if not geom.is_valid:
+                        parse_errors += 1
+                        continue
+                
+                # Extract properties
+                props = feature.get("properties", {})
+                
+                # Extract and validate external ID
+                external_id = props.get(self.config["id_field"])
+                if not external_id:
+                    logger.warning(f"Feature {idx} missing ID field {self.config['id_field']}")
+                    external_id = f"unknown_{idx}"
+                
+                # Calculate area if not provided
+                area_sqft = props.get(self.config.get("area_field"))
+                if not area_sqft and geom.geom_type in ['Polygon', 'MultiPolygon']:
+                    # Convert from square degrees to approximate square feet
+                    # This is rough but better than nothing
+                    area_sqft = geom.area * 10763910.4  # sq degrees to sq feet (approximate)
+                
+                # Extract zoning code
+                zoning_code = props.get(self.config.get("zoning_field"))
+                
+                # Calculate centroid
+                try:
+                    centroid = geom.centroid
+                except Exception:
+                    centroid = None
+                
+                # Map to standard format
+                parcel = {
+                    "external_id": str(external_id),
+                    "geometry": geom,
+                    "centroid": centroid,
+                    "area_sqft": float(area_sqft) if area_sqft else None,
+                    "zoning_code": zoning_code,
+                    "attributes": props,
+                    "source": f"arcgis_{self.region}_{self.layer}",
+                    "region_code": self.region,
+                    "parsed_at": datetime.now().isoformat()
+                }
+                
+                parcels.append(parcel)
+                
+            except Exception as e:
+                logger.warning(f"Failed to parse feature {idx}: {e}")
+                parse_errors += 1
+                continue
+        
+        if parse_errors > 0:
+            logger.warning(f"Failed to parse {parse_errors}/{len(features)} features")
+        
+        return parcels
+    
+    async def get_metadata(self) -> Dict[str, Any]:
+        """Get metadata about the feature service with caching."""
+        cache_key = f"metadata_{self.region}_{self.layer}"
+        
+        # Check cache
+        cached_result = self._get_from_cache(cache_key)
+        if cached_result:
+            return cached_result
+        
+        try:
+            result = await self.fetch("", params={"f": "json"}, timeout=10)
             
-            params = {
-                "f": "json",
-                "where": where_clause,
-                "outFields": "*",
-                "returnGeometry": "false"
+            metadata = {
+                "name": result.get("name"),
+                "description": result.get("description"),
+                "extent": result.get("extent"),
+                "fields": result.get("fields", []),
+                "capabilities": result.get("capabilities"),
+                "maxRecordCount": result.get("maxRecordCount", 1000),
+                "geometryType": result.get("geometryType"),
+                "spatialReference": result.get("spatialReference"),
+                "service_url": self.config["url"],
+                "region": self.region,
+                "layer": self.layer,
+                "last_updated": datetime.now().isoformat()
             }
             
-            if self.api_key:
-                params["token"] = self.api_key
+            # Cache metadata for longer (24 hours)
+            self._set_cache(cache_key, metadata, ttl=timedelta(hours=24))
             
-            response = await self._make_request(
-                "GET",
-                f"{self.endpoints['assessments']}/query",
-                params=params
-            )
+            logger.info(f"Retrieved metadata for {self.region}/{self.layer}")
+            return metadata
             
-            if not response.success:
-                return response
-            
-            data = response.data
-            features = data.get("features", [])
-            
-            if not features:
-                return ConnectorResponse(
-                    success=False,
-                    error=f"No assessment data found for parcel: {parcel_id}"
-                )
-            
-            assessment = features[0].get("attributes", {})
-            standardized_assessment = self._standardize_assessment_data(assessment)
-            
-            return ConnectorResponse(
-                success=True,
-                data=standardized_assessment,
-                metadata={"parcel_id": parcel_id}
-            )
-        
         except Exception as e:
-            logger.error(f"Error getting assessment data: {str(e)}")
-            return ConnectorResponse(
-                success=False,
-                error=f"Failed to get assessment data: {str(e)}"
-            )
+            logger.error(f"Failed to get metadata for {self.region}/{self.layer}: {e}")
+            return {"error": str(e), "region": self.region, "layer": self.layer}
     
-    def _standardize_parcel_data(
+    def _generate_cache_key(self, *args) -> str:
+        """Generate a cache key from arguments."""
+        key_string = "_".join(str(arg) for arg in args)
+        return hashlib.md5(key_string.encode()).hexdigest()
+    
+    def _get_from_cache(self, key: str) -> Optional[Any]:
+        """Get item from cache if not expired."""
+        if key in self._cache:
+            item, timestamp = self._cache[key]
+            if datetime.now() - timestamp < self._cache_ttl:
+                return item
+            else:
+                # Remove expired item
+                del self._cache[key]
+        return None
+    
+    def _set_cache(self, key: str, value: Any, ttl: Optional[timedelta] = None):
+        """Set item in cache with timestamp."""
+        self._cache[key] = (value, datetime.now())
+        
+        # Simple cache cleanup - remove old items if cache gets too large
+        if len(self._cache) > 100:
+            # Remove oldest 20 items
+            oldest_keys = sorted(
+                self._cache.keys(),
+                key=lambda k: self._cache[k][1]
+            )[:20]
+            for old_key in oldest_keys:
+                del self._cache[old_key]
+    
+    def _validate_bbox(self, min_lon: float, min_lat: float, max_lon: float, max_lat: float) -> bool:
+        """Validate bounding box coordinates."""
+        # Check coordinate ranges
+        if not (-180 <= min_lon <= 180 and -180 <= max_lon <= 180):
+            return False
+        if not (-90 <= min_lat <= 90 and -90 <= max_lat <= 90):
+            return False
+        
+        # Check that min < max
+        if min_lon >= max_lon or min_lat >= max_lat:
+            return False
+        
+        # Check reasonable size (not larger than a state)
+        if (max_lon - min_lon) > 10 or (max_lat - min_lat) > 10:
+            logger.warning(f"Very large bbox: {max_lon - min_lon}° x {max_lat - min_lat}°")
+        
+        return True
+    
+    async def batch_query_with_pagination(
         self,
-        attributes: Dict[str, Any],
-        geometry: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """
-        Standardize parcel data from ArcGIS service
+        min_lon: float,
+        min_lat: float,
+        max_lon: float,
+        max_lat: float,
+        max_total: int = 10000
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Query parcels with automatic pagination to get all results."""
+        all_parcels = []
+        all_metadata = []
+        offset = 0
+        limit = self.config.get("max_records", 1000)
         
-        Args:
-            attributes: Raw attributes from ArcGIS
-            geometry: Geometry data (optional)
+        logger.info(f"Starting batch query for {self.region} with max {max_total} parcels")
+        
+        while len(all_parcels) < max_total:
+            remaining = max_total - len(all_parcels)
+            current_limit = min(limit, remaining)
             
-        Returns:
-            Dict[str, Any]: Standardized parcel data
-        """
-        # Common field mappings (these may vary by service)
-        field_mappings = {
-            "APN": ["APN", "PARCEL_ID", "PARCEL_NUMBER", "PIN"],
-            "OWNER_NAME": ["OWNER_NAME", "OWNER", "OWNERNAME", "TAXPAYER"],
-            "SITUS_ADDRESS": ["SITUS_ADDRESS", "ADDRESS", "SITE_ADDR", "PROP_ADDR"],
-            "LAND_VALUE": ["LAND_VALUE", "LANDVAL", "ASSESSED_LAND"],
-            "IMPROVEMENT_VALUE": ["IMPROVEMENT_VALUE", "IMPVAL", "ASSESSED_IMP"],
-            "TOTAL_VALUE": ["TOTAL_VALUE", "TOTALVAL", "ASSESSED_TOTAL"],
-            "ACRES": ["ACRES", "ACREAGE", "AREA_ACRES"],
-            "SQUARE_FEET": ["SQUARE_FEET", "AREA_SQFT", "LOT_SIZE"],
-            "YEAR_BUILT": ["YEAR_BUILT", "YR_BLT", "BUILD_YEAR"],
-            "LAND_USE": ["LAND_USE", "USE_CODE", "PROPERTY_TYPE"],
-            "ZONING": ["ZONING", "ZONE", "ZONING_CODE"]
+            parcels, metadata = await self.query_parcels_by_bbox(
+                min_lon, min_lat, max_lon, max_lat,
+                limit=current_limit,
+                offset=offset,
+                cache_key_suffix=f"batch_{offset}"
+            )
+            
+            if not parcels:
+                logger.info(f"No more parcels returned at offset {offset}")
+                break
+            
+            all_parcels.extend(parcels)
+            all_metadata.append(metadata)
+            offset += len(parcels)
+            
+            # If we got fewer than requested, we've reached the end
+            if len(parcels) < current_limit:
+                logger.info(f"Reached end of results at offset {offset}")
+                break
+            
+            # Small delay to be respectful to the service
+            await asyncio.sleep(0.1)
+        
+        # Combine metadata
+        combined_metadata = {
+            "total_returned": len(all_parcels),
+            "total_queries": len(all_metadata),
+            "source": f"arcgis_{self.region}_{self.layer}",
+            "bbox": [min_lon, min_lat, max_lon, max_lat],
+            "queries": all_metadata
         }
         
-        standardized = {}
-        
-        # Map fields using field mappings
-        for standard_field, possible_fields in field_mappings.items():
-            for field in possible_fields:
-                if field in attributes and attributes[field] is not None:
-                    standardized[standard_field.lower()] = attributes[field]
-                    break
-        
-        # Add geometry if provided
-        if geometry:
-            standardized["geometry"] = geometry
-            
-            # Calculate centroid for polygon geometry
-            if geometry.get("type") == "polygon" and geometry.get("rings"):
-                rings = geometry["rings"][0]  # Outer ring
-                if rings:
-                    # Simple centroid calculation
-                    x_coords = [point[0] for point in rings]
-                    y_coords = [point[1] for point in rings]
-                    centroid_x = sum(x_coords) / len(x_coords)
-                    centroid_y = sum(y_coords) / len(y_coords)
-                    standardized["centroid"] = {
-                        "longitude": centroid_x,
-                        "latitude": centroid_y
-                    }
-        
-        # Add all original attributes for reference
-        standardized["original_attributes"] = attributes
-        
-        # Add data source metadata
-        standardized["data_source"] = "arcgis"
-        standardized["last_updated"] = attributes.get("LAST_UPDATE", attributes.get("EditDate"))
-        
-        return standardized
-    
-    def _standardize_assessment_data(self, attributes: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Standardize assessment data from ArcGIS service
-        
-        Args:
-            attributes: Raw assessment attributes
-            
-        Returns:
-            Dict[str, Any]: Standardized assessment data
-        """
-        standardized = {
-            "assessed_value": attributes.get("ASSESSED_VALUE") or attributes.get("TOTAL_VALUE"),
-            "land_value": attributes.get("LAND_VALUE"),
-            "improvement_value": attributes.get("IMPROVEMENT_VALUE"),
-            "tax_year": attributes.get("TAX_YEAR") or attributes.get("YEAR"),
-            "tax_amount": attributes.get("TAX_AMOUNT") or attributes.get("ANNUAL_TAX"),
-            "exemptions": attributes.get("EXEMPTIONS"),
-            "assessment_date": attributes.get("ASSESSMENT_DATE"),
-            "original_attributes": attributes,
-            "data_source": "arcgis_assessment"
-        }
-        
-        return standardized
+        logger.info(f"Batch query completed: {len(all_parcels)} parcels from {len(all_metadata)} queries")
+        return all_parcels, combined_metadata

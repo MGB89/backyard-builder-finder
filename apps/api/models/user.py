@@ -2,7 +2,7 @@
 User model for authentication and authorization
 """
 
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Text, Enum
+from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Text, Enum, Integer
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import UUID
@@ -31,12 +31,17 @@ class User(Base):
     # Authentication
     username = Column(String(100), unique=True, nullable=False, index=True)
     email = Column(String(255), unique=True, nullable=False, index=True)
-    hashed_password = Column(String(255), nullable=False)
+    hashed_password = Column(String(255), nullable=True)  # Nullable for OAuth users
     
     # Profile information
-    first_name = Column(String(100), nullable=False)
-    last_name = Column(String(100), nullable=False)
+    first_name = Column(String(100), nullable=True)
+    last_name = Column(String(100), nullable=True)
     phone = Column(String(50), nullable=True)
+    profile_image = Column(String(500), nullable=True)
+    
+    # OAuth integration
+    oauth_provider = Column(String(50), nullable=True)  # 'google', 'azure-ad', etc.
+    oauth_provider_id = Column(String(255), nullable=True)  # Provider's user ID
     
     # Role and permissions
     role = Column(Enum(UserRole), default=UserRole.member, nullable=False)

@@ -1,0 +1,40 @@
+{
+  "name": "@backyard-builder/providers",
+  "version": "1.0.0",
+  "description": "Provider abstraction layer for multi-cloud deployment",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "jest",
+    "lint": "eslint src/**/*.ts",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "aws-sdk": "^2.1450.0",
+    "pg-boss": "^9.0.3",
+    "libsodium-wrappers": "^0.7.11",
+    "@opentelemetry/api": "^1.7.0",
+    "@opentelemetry/exporter-http": "^0.45.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/libsodium-wrappers": "^0.7.13",
+    "typescript": "^5.3.0",
+    "eslint": "^8.55.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "jest": "^29.7.0",
+    "@types/jest": "^29.5.0"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./storage": "./dist/storage/index.js",
+    "./queue": "./dist/queue/index.js",
+    "./secrets": "./dist/secrets/index.js",
+    "./metrics": "./dist/metrics/index.js",
+    "./geocode": "./dist/geocode/index.js"
+  }
+}

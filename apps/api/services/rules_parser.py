@@ -5,6 +5,9 @@ Rules parser service for interpreting zoning and building codes
 from typing import Dict, Any, List, Optional, Union, Tuple
 import logging
 import re
+import json
+import hashlib
+from functools import lru_cache
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -56,6 +59,17 @@ class RulesParserService:
                 "school", "church", "hospital", "government", "library", "museum",
                 "community center", "fire station", "police station"
             ]
+        }
+        
+        # Cache for parsed rules
+        self._parsing_cache = {}
+        
+        # Enhanced patterns for better parsing
+        self.enhanced_patterns = {
+            "dimensional_table": r"(?:dimensional\s+standards?|development\s+standards?).*?(?:table|chart)\s*(.*?)(?:\n\n|$)",
+            "use_table": r"(?:permitted\s+uses?|use\s+table|use\s+regulations?)\s*(.*?)(?:\n\n|$)",
+            "numeric_range": r"(\d+(?:\.\d+)?)\s*(?:to|-)\s*(\d+(?:\.\d+)?)",
+            "conditional_text": r"(?:provided\s+that|subject\s+to|except\s+that|unless)\s+(.*?)(?:\.|;|$)"
         }
     
     def parse_zoning_text(self, zoning_text: str, zoning_code: str = None) -> Dict[str, Any]:
@@ -116,14 +130,26 @@ class RulesParserService:
             if special:
                 parsed_rules["special_requirements"] = special
             
-            return {
+            result = {
                 "success": True,
                 "zoning_code": zoning_code,
                 "parsed_rules": parsed_rules,
                 "source_text_length": len(zoning_text),
                 "parsing_confidence": self._calculate_parsing_confidence(parsed_rules),
-                "parsed_at": datetime.utcnow().isoformat()
+                "parsed_at": datetime.utcnow().isoformat(),
+                "text_complexity": self._analyze_text_complexity(cleaned_text),
+                "parsing_metadata": {
+                    "rules_found": len(parsed_rules),
+                    "text_sections_analyzed": self._count_text_sections(cleaned_text),
+                    "parsing_method": "regex_pattern_matching"
+                }
             }
+            
+            # Cache the result
+            cache_key = self._create_cache_key(zoning_text, zoning_code)
+            self._parsing_cache[cache_key] = result
+            
+            return result
         
         except Exception as e:
             logger.error(f"Error parsing zoning text: {str(e)}")
@@ -539,3 +565,199 @@ class RulesParserService:
         """Calculate validation score based on consistency"""
         penalty = len(inconsistencies) * 0.3 + len(warnings) * 0.1
         return max(0.0, 1.0 - penalty)
+    
+    def _create_cache_key(self, text: str, zoning_code: str = None) -> str:
+        """Create cache key for parsed rules"""
+        key_data = {
+            "text_hash": hashlib.md5(text.encode()).hexdigest(),
+            "zoning_code": zoning_code,
+            "text_length": len(text)
+        }
+        key_str = json.dumps(key_data, sort_keys=True)
+        return hashlib.md5(key_str.encode()).hexdigest()
+    
+    @lru_cache(maxsize=128)
+    def _cached_pattern_search(self, pattern: str, text: str, flags: int = 0) -> List[str]:
+        """Cached regex pattern search"""
+        matches = re.finditer(pattern, text, flags)
+        return [match.group() for match in matches]
+    
+    def _analyze_text_complexity(self, text: str) -> Dict[str, Any]:
+        """Analyze text complexity for parsing confidence"""
+        return {
+            "word_count": len(text.split()),
+            "sentence_count": len(re.split(r'[.!?]+', text)),
+            "avg_sentence_length": len(text.split()) / max(1, len(re.split(r'[.!?]+', text))),
+            "has_tables": bool(re.search(r'\|.*\|', text)),
+            "has_lists": bool(re.search(r'^\s*[\d\w][\.\)]', text, re.MULTILINE)),
+            "technical_terms": len(re.findall(r'\b(?:setback|coverage|density|FAR|zoning)\b', text, re.IGNORECASE))
+        }
+    
+    def _count_text_sections(self, text: str) -> int:
+        """Count identifiable text sections"""
+        section_patterns = [
+            r'\b(?:section|subsection|paragraph)\s+\d+',
+            r'^\s*\d+\.\s*[A-Z]',
+            r'^\s*[A-Z]\.\s',
+            r'\([a-z]\)',
+            r'\(\d+\)'
+        ]
+        
+        total_sections = 0
+        for pattern in section_patterns:
+            matches = re.findall(pattern, text, re.MULTILINE | re.IGNORECASE)
+            total_sections += len(matches)
+        
+        return total_sections
+    
+    def parse_dimensional_standards_table(self, table_text: str) -> Dict[str, Any]:
+        """Parse dimensional standards from table format"""
+        try:
+            standards = {}
+            
+            # Look for table rows with dimensional data
+            row_pattern = r'([^|\n]+)\|([^|\n]+)\|([^|\n]+)'
+            rows = re.findall(row_pattern, table_text)
+            
+            for row in rows:
+                if len(row) >= 3:
+                    category = row[0].strip().lower()
+                    value = row[1].strip()
+                    unit = row[2].strip() if len(row) > 2 else ""
+                    
+                    # Extract numeric values
+                    numeric_match = re.search(r'(\d+(?:\.\d+)?)', value)
+                    if numeric_match:
+                        numeric_value = float(numeric_match.group(1))
+                        
+                        # Categorize the standard
+                        if 'height' in category:
+                            standards['max_height_ft'] = numeric_value
+                        elif 'coverage' in category:
+                            standards['max_coverage_percent'] = numeric_value
+                        elif 'setback' in category:
+                            if 'front' in category:
+                                standards['front_setback_ft'] = numeric_value
+                            elif 'rear' in category:
+                                standards['rear_setback_ft'] = numeric_value
+                            elif 'side' in category:
+                                standards['side_setback_ft'] = numeric_value
+                        elif 'density' in category:
+                            standards['max_density_units_acre'] = numeric_value
+            
+            return standards
+        
+        except Exception as e:
+            logger.error(f"Error parsing dimensional standards table: {str(e)}")
+            return {}
+    
+    def extract_conditional_requirements(self, text: str) -> List[Dict[str, str]]:
+        """Extract conditional requirements and exceptions"""
+        conditionals = []
+        
+        # Look for conditional phrases
+        conditional_patterns = [
+            r'provided\s+that\s+(.*?)(?:\.|;|$)',
+            r'subject\s+to\s+(.*?)(?:\.|;|$)',
+            r'except\s+(?:that\s+|where\s+)?(.*?)(?:\.|;|$)',
+            r'unless\s+(.*?)(?:\.|;|$)',
+            r'if\s+(.*?)(?:,\s*then\s+(.*?))?(?:\.|;|$)'
+        ]
+        
+        for pattern in conditional_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                condition = match.group(1).strip()
+                requirement = match.group(2).strip() if match.lastindex > 1 else ""
+                
+                conditionals.append({
+                    "type": "conditional_requirement",
+                    "condition": condition,
+                    "requirement": requirement,
+                    "source_text": match.group(0)
+                })
+        
+        return conditionals
+    
+    def parse_use_matrix(self, matrix_text: str) -> Dict[str, List[str]]:
+        """Parse use matrix or table from text"""
+        try:
+            use_categories = {"permitted": [], "conditional": [], "prohibited": []}
+            
+            # Split into lines and process each
+            lines = matrix_text.split('\n')
+            current_category = None
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Check if line indicates a category
+                if re.search(r'permitted|allowed', line, re.IGNORECASE):
+                    current_category = "permitted"
+                elif re.search(r'conditional|special', line, re.IGNORECASE):
+                    current_category = "conditional"
+                elif re.search(r'prohibited|forbidden|not\s+permitted', line, re.IGNORECASE):
+                    current_category = "prohibited"
+                elif current_category and line:
+                    # Extract use types from the line
+                    uses = self._extract_use_list(line)
+                    use_categories[current_category].extend(uses)
+            
+            return {k: list(set(v)) for k, v in use_categories.items() if v}
+        
+        except Exception as e:
+            logger.error(f"Error parsing use matrix: {str(e)}")
+            return {}
+    
+    def identify_zoning_intent(self, text: str) -> Dict[str, Any]:
+        """Identify the intent and purpose of the zoning district"""
+        try:
+            intent_patterns = {
+                "purpose": r'(?:purpose|intent|objective)\s*[:.]?\s*(.*?)(?:\.|;|\n\n)',
+                "character": r'(?:character|nature|type)\s*[:.]?\s*(.*?)(?:\.|;|\n\n)',
+                "development_pattern": r'(?:development\s+pattern|urban\s+form)\s*[:.]?\s*(.*?)(?:\.|;|\n\n)'
+            }
+            
+            intent_analysis = {}
+            
+            for category, pattern in intent_patterns.items():
+                matches = re.finditer(pattern, text, re.IGNORECASE | re.DOTALL)
+                for match in matches:
+                    intent_text = match.group(1).strip()
+                    if intent_text and len(intent_text) > 10:
+                        intent_analysis[category] = intent_text[:200]  # Limit length
+                        break
+            
+            # Analyze development intensity
+            intensity_indicators = {
+                "low_density": len(re.findall(r'\b(?:single.family|detached|low.density)\b', text, re.IGNORECASE)),
+                "medium_density": len(re.findall(r'\b(?:duplex|triplex|medium.density|townhouse)\b', text, re.IGNORECASE)),
+                "high_density": len(re.findall(r'\b(?:apartment|multi.family|high.density|high.rise)\b', text, re.IGNORECASE)),
+                "commercial": len(re.findall(r'\b(?:commercial|retail|office|business)\b', text, re.IGNORECASE)),
+                "mixed_use": len(re.findall(r'\b(?:mixed.use|mixed.development)\b', text, re.IGNORECASE))
+            }
+            
+            intent_analysis["development_intensity"] = max(intensity_indicators, key=intensity_indicators.get)
+            intent_analysis["intensity_score"] = max(intensity_indicators.values())
+            
+            return intent_analysis
+        
+        except Exception as e:
+            logger.error(f"Error identifying zoning intent: {str(e)}")
+            return {}
+    
+    def clear_parsing_cache(self):
+        """Clear the parsing cache"""
+        self._parsing_cache.clear()
+        self._cached_pattern_search.cache_clear()
+    
+    def get_parsing_statistics(self) -> Dict[str, Any]:
+        """Get statistics about parsing performance"""
+        return {
+            "cache_size": len(self._parsing_cache),
+            "cached_searches": self._cached_pattern_search.cache_info()._asdict(),
+            "pattern_count": len(self.rule_patterns),
+            "enhanced_pattern_count": len(self.enhanced_patterns)
+        }

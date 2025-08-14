@@ -1,0 +1,32 @@
+[build]
+  base = "."
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "18"
+  NEXT_PUBLIC_API_URL = "https://backyard-builder-api.onrender.com"
+  NEXT_PUBLIC_APP_NAME = "Backyard Builder Finder"
+  NEXT_PUBLIC_SUPABASE_URL = "https://pxrjayteytwhdqpaetcn.supabase.co"
+  NEXT_PUBLIC_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB4cmpheXRleXR3aGRxcGFldGNuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTUxNDcwMjMsImV4cCI6MjA3MDcyMzAyM30.t4Rvy7lBF7H03QuQn2jOooe_Q0azRe6MgbRcmrWNShk"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+[[redirects]]
+  from = "/api/proxy/*"
+  to = "https://backyard-builder-api.onrender.com/api/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[dev]
+  command = "npm run dev"
+  port = 3000
+  targetPort = 3000
+  publish = ".next"
+  autoLaunch = false
