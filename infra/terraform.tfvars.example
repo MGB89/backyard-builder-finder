@@ -1,0 +1,162 @@
+# =============================================================================
+# Terraform Variables Example File
+# Copy this file to terraform.tfvars and customize the values for your environment
+# =============================================================================
+
+# General Configuration
+aws_region   = "us-west-2"
+environment  = "dev"  # dev, staging, prod
+project_name = "property-assessment"
+created_by   = "your-name"
+cost_center  = "engineering"
+
+# VPC Configuration
+vpc_cidr = "10.0.0.0/16"
+availability_zones = ["us-west-2a", "us-west-2b", "us-west-2c"]
+
+# Subnet CIDR blocks
+public_subnet_cidrs   = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+private_subnet_cidrs  = ["10.0.11.0/24", "10.0.12.0/24", "10.0.13.0/24"]
+database_subnet_cidrs = ["10.0.21.0/24", "10.0.22.0/24", "10.0.23.0/24"]
+
+# RDS Configuration
+rds_instance_class        = "db.t3.micro"  # Use db.r5.large or higher for production
+rds_allocated_storage     = 20
+rds_max_allocated_storage = 100
+rds_engine_version        = "15.4"
+rds_database_name         = "property_assessment"
+rds_username              = "postgres"
+rds_backup_retention_period = 7
+rds_backup_window         = "03:00-04:00"
+rds_maintenance_window    = "sun:04:00-sun:05:00"
+rds_deletion_protection   = false  # Set to true for production
+
+# ECS Configuration
+ecs_cpu           = 256   # 0.25 vCPU
+ecs_memory        = 512   # 512 MB
+ecs_desired_count = 2
+ecs_min_capacity  = 1
+ecs_max_capacity  = 10
+app_image         = "nginx:latest"  # Replace with your application image
+app_port          = 3000
+
+# Lambda Configuration
+lambda_runtime     = "python3.11"
+lambda_timeout     = 300
+lambda_memory_size = 256
+
+# S3 Configuration
+s3_force_destroy       = true   # Set to false for production
+s3_versioning_enabled  = true
+
+# CloudFront Configuration
+cloudfront_price_class             = "PriceClass_100"  # PriceClass_All for global distribution
+cloudfront_minimum_protocol_version = "TLSv1.2_2021"
+
+# ALB Configuration
+alb_deletion_protection = false  # Set to true for production
+alb_idle_timeout        = 60
+
+# Domain Configuration (Optional)
+# Uncomment and configure if you have a custom domain
+# domain_name     = "your-domain.com"
+# certificate_arn = "arn:aws:acm:us-west-2:123456789012:certificate/12345678-1234-1234-1234-123456789012"
+
+# Monitoring Configuration
+enable_detailed_monitoring = true
+log_retention_days        = 30
+
+# Security Configuration
+allowed_cidr_blocks = ["0.0.0.0/0"]  # Restrict this for production
+enable_waf          = false           # Set to true for production
+
+# SQS Configuration
+sqs_visibility_timeout_seconds = 300
+sqs_message_retention_seconds  = 1209600  # 14 days
+sqs_max_receive_count         = 3
+
+# =============================================================================
+# Environment-Specific Examples
+# =============================================================================
+
+# Development Environment
+# environment                = "dev"
+# rds_instance_class        = "db.t3.micro"
+# ecs_desired_count         = 1
+# ecs_min_capacity          = 1
+# ecs_max_capacity          = 3
+# s3_force_destroy          = true
+# rds_deletion_protection   = false
+# alb_deletion_protection   = false
+# enable_detailed_monitoring = false
+# log_retention_days        = 7
+# cloudfront_price_class    = "PriceClass_100"
+
+# Staging Environment
+# environment                = "staging"
+# rds_instance_class        = "db.t3.small"
+# ecs_desired_count         = 2
+# ecs_min_capacity          = 1
+# ecs_max_capacity          = 5
+# s3_force_destroy          = false
+# rds_deletion_protection   = true
+# alb_deletion_protection   = true
+# enable_detailed_monitoring = true
+# log_retention_days        = 14
+# cloudfront_price_class    = "PriceClass_100"
+# enable_waf                = true
+
+# Production Environment
+# environment                = "prod"
+# rds_instance_class        = "db.r5.large"
+# rds_allocated_storage     = 100
+# rds_max_allocated_storage = 1000
+# ecs_cpu                   = 1024  # 1 vCPU
+# ecs_memory                = 2048  # 2 GB
+# ecs_desired_count         = 3
+# ecs_min_capacity          = 2
+# ecs_max_capacity          = 20
+# lambda_memory_size        = 512
+# s3_force_destroy          = false
+# rds_deletion_protection   = true
+# alb_deletion_protection   = true
+# enable_detailed_monitoring = true
+# log_retention_days        = 90
+# cloudfront_price_class    = "PriceClass_All"
+# enable_waf                = true
+# allowed_cidr_blocks       = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+
+# =============================================================================
+# Security Notes
+# =============================================================================
+
+# 1. Never commit terraform.tfvars to version control if it contains sensitive data
+# 2. Use AWS Secrets Manager for sensitive configuration values
+# 3. Consider using Terraform Cloud or AWS Systems Manager Parameter Store
+#    for managing variables across environments
+# 4. Restrict allowed_cidr_blocks to your organization's IP ranges for production
+# 5. Enable WAF and configure appropriate rules for production environments
+# 6. Use strong SSL policies and enable deletion protection for production resources
+# 7. Review and adjust backup retention periods based on your compliance requirements
+
+# =============================================================================
+# Cost Optimization Notes
+# =============================================================================
+
+# 1. Use smaller instance types for development environments
+# 2. Enable S3 lifecycle policies to transition old data to cheaper storage classes
+# 3. Use CloudFront PriceClass_100 for cost optimization if global distribution isn't needed
+# 4. Consider using Reserved Instances or Savings Plans for production workloads
+# 5. Monitor costs regularly using AWS Cost Explorer and set up billing alerts
+# 6. Use Spot instances for non-critical workloads where appropriate
+
+# =============================================================================
+# Performance Notes
+# =============================================================================
+
+# 1. Use larger RDS instances (r5.large or higher) for production
+# 2. Enable RDS Performance Insights for production databases
+# 3. Consider using RDS Proxy for connection pooling in high-traffic scenarios
+# 4. Use appropriate ECS task sizes based on your application requirements
+# 5. Enable CloudFront for better global performance
+# 6. Configure Auto Scaling policies based on your traffic patterns

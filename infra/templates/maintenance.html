@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Maintenance Mode - Property Assessment System</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        
+        .maintenance-container {
+            background: white;
+            padding: 60px 40px;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            text-align: center;
+            max-width: 600px;
+            width: 100%;
+        }
+        
+        .maintenance-icon {
+            font-size: 4rem;
+            margin-bottom: 30px;
+            color: #667eea;
+        }
+        
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 20px;
+            color: #2d3748;
+            font-weight: 700;
+        }
+        
+        .subtitle {
+            font-size: 1.2rem;
+            color: #718096;
+            margin-bottom: 40px;
+            line-height: 1.6;
+        }
+        
+        .maintenance-details {
+            background: #f7fafc;
+            padding: 30px;
+            border-radius: 15px;
+            margin-bottom: 40px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .maintenance-details h3 {
+            color: #2d3748;
+            margin-bottom: 15px;
+            font-size: 1.3rem;
+        }
+        
+        .maintenance-details p {
+            color: #4a5568;
+            line-height: 1.6;
+            margin-bottom: 10px;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e2e8f0;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 20px 0;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            width: 0%;
+            border-radius: 4px;
+            animation: progress 30s linear infinite;
+        }
+        
+        @keyframes progress {
+            0% { width: 0%; }
+            50% { width: 60%; }
+            100% { width: 90%; }
+        }
+        
+        .contact-info {
+            background: #fff5f5;
+            border: 1px solid #fed7d7;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 30px;
+        }
+        
+        .contact-info h4 {
+            color: #c53030;
+            margin-bottom: 10px;
+        }
+        
+        .contact-info p {
+            color: #718096;
+            margin-bottom: 5px;
+        }
+        
+        .status-badge {
+            display: inline-block;
+            background: #fbb6ce;
+            color: #97266d;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            margin-bottom: 20px;
+        }
+        
+        @media (max-width: 768px) {
+            .maintenance-container {
+                padding: 40px 20px;
+            }
+            
+            h1 {
+                font-size: 2rem;
+            }
+            
+            .maintenance-icon {
+                font-size: 3rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="maintenance-container">
+        <div class="maintenance-icon">🔧</div>
+        
+        <div class="status-badge">System Maintenance</div>
+        
+        <h1>We'll be back soon!</h1>
+        
+        <p class="subtitle">
+            The Property Assessment System is currently undergoing scheduled maintenance 
+            to improve performance and add new features.
+        </p>
+        
+        <div class="maintenance-details">
+            <h3>Maintenance Details</h3>
+            <p><strong>Started:</strong> <span id="maintenance-start">Loading...</span></p>
+            <p><strong>Expected completion:</strong> <span id="maintenance-end">Loading...</span></p>
+            <p><strong>Type:</strong> System upgrades and database optimization</p>
+            
+            <div class="progress-bar">
+                <div class="progress-fill"></div>
+            </div>
+        </div>
+        
+        <div class="contact-info">
+            <h4>Need Immediate Assistance?</h4>
+            <p>📧 Email: support@propertyassessment.com</p>
+            <p>📞 Phone: 1-800-PROPERTY (1-800-776-7378)</p>
+            <p>💬 Status updates: @PropertySystemStatus</p>
+        </div>
+    </div>
+    
+    <script>
+        // Set maintenance times (you can update these as needed)
+        const startTime = new Date();
+        const endTime = new Date(startTime.getTime() + (2 * 60 * 60 * 1000)); // 2 hours from now
+        
+        document.getElementById('maintenance-start').textContent = startTime.toLocaleString();
+        document.getElementById('maintenance-end').textContent = endTime.toLocaleString();
+        
+        // Auto-refresh page every 5 minutes to check if maintenance is complete
+        setTimeout(() => {
+            window.location.reload();
+        }, 5 * 60 * 1000);
+    </script>
+</body>
+</html>
